@@ -1,0 +1,269 @@
+//! Icon button components with theme-aware styling.
+//!
+//! Single icon btns used throughout the toolbar for tools,
+//! toggles, and actions.
+
+use crate::icons::Icon;
+use crate::localization as l10n;
+use crate::theme::ThemeExt;
+use egui::{
+    Color32, Rect, RectAlign, Response, Role, Sense, Stroke, StrokeKind, Tooltip, Ui, Vec2,
+    WidgetInfo,
+};
+
+use super::svg_helpers::{rail_icon_color, rail_icon_size, render_svg_at_rect_themed};
+use crate::tokens::DESIGN_TOKENS;
+
+/// Single icon button with theme-aware rendering.
+///
+/// Draws a square button with:
+/// - Hover background
+/// - Active/selected background
+/// - Centered SVG icon with theme colors
+///
+/// # Arguments
+///
+/// * `ui` - The egui UI context
+/// * `icon` - The Icon to display
+/// * `tooltip` - Hover tooltip text
+/// * `is_active` - Whether button is in active/selected state
+/// * `size` - Button size (square)
+///
+/// # Returns
+///
+/// The egui Response for click handling.
+pub fn draw_icon_btn(
+    ui: &mut Ui,
+    icon: &Icon,
+    tooltip: &'static str,
+    is_active: bool,
+    size: f32,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    crate::styles::focus::draw_focus_ring(ui, &response, ui.active_theme().radius.sm);
+
+    let bg_color = if is_active && response.hovered() {
+        super::active_hover_color(ui)
+    } else if is_active {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT // Let parent Frame's background show through
+    };
+
+    ui.painter()
+        .rect_filled(rect, ui.active_theme().radius.sm, bg_color);
+
+    render_svg_at_rect_themed(ui, icon, rect, response.hovered(), is_active);
+
+    let translated_label = l10n::text(ui.ctx(), tooltip);
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            Role::Button,
+            response.enabled(),
+            is_active,
+            &translated_label,
+        )
+    });
+    response.on_hover_text(l10n::text(ui.ctx(), tooltip))
+}
+
+/// Toggle button with icon (alias for draw_icon_btn since functionally identical).
+///
+/// Used for toggleable states like magnet mode, keep drawing, lock, etc.
+///
+/// # Arguments
+///
+/// * `ui` - The egui UI context
+/// * `icon` - The Icon to display
+/// * `tooltip` - Hover tooltip text
+/// * `is_toggled` - Whether toggle is on
+/// * `size` - Button size (square)
+///
+/// # Returns
+///
+/// The egui Response for click handling.
+pub fn draw_toggle_btn(
+    ui: &mut Ui,
+    icon: &Icon,
+    tooltip: &'static str,
+    is_toggled: bool,
+    size: f32,
+) -> Response {
+    draw_icon_btn(ui, icon, tooltip, is_toggled, size)
+}
+
+/// Icon button with left padding.
+///
+/// Layout: [left_padding | icon_btn]
+/// Used for tool btns that need consistent alignment with PairButton.
+///
+/// # Arguments
+///
+/// * `ui` - The egui UI context
+/// * `icon` - The Icon to display
+/// * `tooltip` - Hover tooltip text
+/// * `is_active` - Whether button is in active/selected state
+/// * `icon_size` - Icon size
+/// * `padding` - Left padding amount
+///
+/// # Returns
+///
+/// The egui Response for click handling.
+pub fn draw_icon_button_padded(
+    ui: &mut Ui,
+    icon: &Icon,
+    tooltip: &str,
+    is_active: bool,
+    icon_size: f32,
+    padding: f32,
+) -> Response {
+    // Full rect for allocation
+    let size = Vec2::splat(icon_size + padding * 2.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    crate::styles::focus::draw_focus_ring(ui, &response, ui.active_theme().radius.sm);
+
+    // Add pressed state for click feedback
+    let bg_color = if is_active {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.is_pointer_button_down_on() {
+        super::active_hover_color(ui)
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT // Let parent Frame's background show through
+    };
+
+    // Draw icon button - SQUARE, centered in button
+    let icon_button_rect = egui::Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
+    ui.painter()
+        .rect_filled(icon_button_rect, ui.active_theme().radius.sm, bg_color);
+
+    let is_hovered = response.hovered() || response.is_pointer_button_down_on();
+    render_svg_at_rect_themed(ui, icon, icon_button_rect, is_hovered, is_active);
+
+    let translated_label = l10n::text(ui.ctx(), tooltip);
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            Role::Button,
+            response.enabled(),
+            is_active,
+            &translated_label,
+        )
+    });
+    response.on_hover_text(l10n::text(ui.ctx(), tooltip))
+}
+
+/// Left toolbar button (no dropdown arrow).
+///
+/// Layout:
+/// - Outer rect: 52×38px
+/// - Inner hover rect: 8.5px horizontal margin, 1.5px vertical margin
+/// - Inner rounding: the theme's medium radius
+/// - Icon: optically sized and centered in outer rect
+///
+/// A selected tool has a neutral fill; a latched utility uses contrasting ink and fill.
+/// The tooltip opens to the right of the bar, so it never covers the next button.
+///
+/// # Arguments
+///
+/// * `ui` - The egui UI context
+/// * `icon` - The Icon to display
+/// * `tooltip` - Hover tooltip text, also the accessible name
+/// * `is_selected` - Whether button is selected/active
+///
+/// # Returns
+///
+/// The egui Response for click handling.
+pub fn draw_tool_button(ui: &mut Ui, icon: &Icon, tooltip: &str, is_selected: bool) -> Response {
+    draw_rail_button(ui, icon, tooltip, is_selected, false)
+}
+
+/// Draw a utility whose latched state is distinct from the selected drawing tool.
+pub(crate) fn draw_latched_button(ui: &mut Ui, icon: &Icon, tooltip: &str, on: bool) -> Response {
+    draw_rail_button(ui, icon, tooltip, on, true)
+}
+
+fn draw_rail_button(
+    ui: &mut Ui,
+    icon: &Icon,
+    tooltip: &str,
+    is_selected: bool,
+    latched: bool,
+) -> Response {
+    let tokens = &DESIGN_TOKENS.sizing.toolbar;
+    let margin = Vec2::new(tokens.hover_margin_h - 0.5, tokens.hover_margin_v - 0.5);
+
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(tokens.button_width, tokens.button_height),
+        Sense::click(),
+    );
+    let translated_label = l10n::text(ui.ctx(), tooltip);
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            Role::Button,
+            response.enabled(),
+            is_selected,
+            &translated_label,
+        )
+    });
+
+    if ui.is_rect_visible(rect) {
+        let theme = ui.active_theme();
+        let inner_rect = rect.shrink2(margin);
+
+        let selected_fill = if latched {
+            theme.ui.text
+        } else if theme.dark {
+            theme.ui.btn_bg_active
+        } else {
+            crate::ui::top_toolbar::buttons::rule_color(&theme)
+        };
+        let selected_ink = if latched {
+            theme.ui.panel_bg
+        } else {
+            rail_icon_color(ui)
+        };
+        let bg = match (is_selected, response.hovered()) {
+            (true, _) => Some(selected_fill),
+            (false, true) => Some(ui.visuals().widgets.hovered.bg_fill),
+            (false, false) => None,
+        };
+        if let Some(bg) = bg {
+            ui.painter().rect_filled(inner_rect, theme.radius.md, bg);
+        }
+        // The inner rect keeps all four sides of the ring inside the bar.
+        // A latched utility's ring follows its contrasting ink.
+        if response.has_focus() {
+            let (ring, ring_rect) = if is_selected {
+                (selected_ink, inner_rect.shrink(DESIGN_TOKENS.stroke.thick))
+            } else {
+                (crate::styles::focus::focus_ring_color(ui), inner_rect)
+            };
+            ui.painter().rect_stroke(
+                ring_rect,
+                theme.radius.md,
+                Stroke::new(DESIGN_TOKENS.stroke.thick, ring),
+                StrokeKind::Inside,
+            );
+        }
+
+        // Icon centered in OUTER rect
+        let icon_rect = Rect::from_center_size(rect.center(), rail_icon_size(icon));
+        let icon_color = if !ui.is_enabled() {
+            theme.ui.text_disabled
+        } else if is_selected {
+            selected_ink
+        } else {
+            rail_icon_color(ui)
+        };
+        icon.as_image_tinted(icon_rect.size(), icon_color)
+            .paint_at(ui, icon_rect);
+    }
+
+    let mut tip = Tooltip::for_enabled(&response);
+    tip.popup = tip.popup.align(RectAlign::RIGHT);
+    tip.show(|ui| ui.label(l10n::text(ui.ctx(), tooltip)));
+    response
+}

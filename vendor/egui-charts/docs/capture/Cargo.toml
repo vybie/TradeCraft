@@ -1,0 +1,27 @@
+[package]
+name = "egui-charts-capture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone like `examples/demo`: built on its own, never by the library crate.
+[workspace]
+
+[[bin]]
+name = "capture"
+path = "main.rs"
+
+[dependencies]
+egui-charts = { path = "../..", features = ["ui", "alert-engine", "strategies", "detectors"] }
+# The demo's dependencies, plus the offscreen renderer.
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "persistence"] }
+egui = { version = "0.37.0", features = ["monochrome_emoji_fonts"] }
+egui_extras = { version = "0.37.0", default-features = false, features = ["svg", "image"] }
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
+chrono = "0.4.43"
+log = "0.4.29"
+maudio = "0.1.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.17.2"

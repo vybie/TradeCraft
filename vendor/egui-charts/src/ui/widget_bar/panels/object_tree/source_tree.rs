@@ -1,0 +1,372 @@
+//! Source tree rendering
+//!
+//! Renders the hierarchical tree of indicators and drawings.
+
+use crate::icons::icons;
+use crate::localization as l10n;
+use crate::ui_kit::{IconButton, buttons::ButtonSize};
+use egui::{RichText, ScrollArea, Ui};
+
+use egui::Vec2;
+
+use super::actions::ObjectTreeAction;
+use super::config::ObjectTreeConfig;
+use super::item_row::render_item_row;
+use super::state::ObjectTreeState;
+use super::types::{SourceItem, SourceType};
+use crate::tokens::DESIGN_TOKENS;
+use crate::ui_kit::ext::UiExt;
+
+/// Render the source tree section
+pub fn render_source_tree(
+    ui: &mut Ui,
+    sources: &mut [SourceItem],
+    config: &ObjectTreeConfig,
+    state: &mut ObjectTreeState,
+) -> ObjectTreeAction {
+    let mut action = ObjectTreeAction::None;
+
+    state.hovered_id = None;
+    state.visible_ids.clear();
+
+    // Filter sources
+    let filter_lower = state.filter_text.to_lowercase();
+
+    ScrollArea::vertical()
+        .max_height(config.max_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if config.group_by_type {
+                // Grouped view: Indicators, Drawings, Templates
+                action = render_grouped_tree(ui, sources, config, state, &filter_lower);
+            } else {
+                // Flat view: all items in z-order
+                action = render_flat_tree(ui, sources, config, state, &filter_lower);
+            }
+        });
+
+    action
+}
+
+/// Render tree grouped by type
+fn render_grouped_tree(
+    ui: &mut Ui,
+    sources: &mut [SourceItem],
+    config: &ObjectTreeConfig,
+    state: &mut ObjectTreeState,
+    filter: &str,
+) -> ObjectTreeAction {
+    let mut action = ObjectTreeAction::None;
+
+    let mut data_source_count = 0;
+    for item in sources.iter_mut() {
+        if item.source_type != SourceType::DataSource || !matches_filter(item, filter, state) {
+            continue;
+        }
+        data_source_count += 1;
+        let item_action = render_item_row(ui, item, config, state, 0);
+        if !item_action.is_none() {
+            action = item_action;
+        }
+    }
+
+    // Count items per type
+    let indicator_count = sources
+        .iter()
+        .filter(|s| s.source_type == SourceType::Indicator && matches_filter(s, filter, state))
+        .count();
+    let drawing_count = sources
+        .iter()
+        .filter(|s| s.source_type == SourceType::Drawing && matches_filter(s, filter, state))
+        .count();
+    let template_count = sources
+        .iter()
+        .filter(|s| s.source_type == SourceType::Template && matches_filter(s, filter, state))
+        .count();
+
+    // Indicators group
+    if indicator_count > 0 {
+        let group_action = render_group(
+            ui,
+            "Indicators",
+            SourceType::Indicator,
+            indicator_count,
+            sources,
+            config,
+            state,
+            filter,
+        );
+        if !group_action.is_none() {
+            action = group_action;
+        }
+    }
+
+    let has_folders = state
+        .folders
+        .iter()
+        .any(|path| super::folders::matches_folder_filter(path, sources, state, filter));
+    // Drawings group
+    if drawing_count > 0 || has_folders {
+        let group_action = render_group(
+            ui,
+            "Drawings",
+            SourceType::Drawing,
+            drawing_count,
+            sources,
+            config,
+            state,
+            filter,
+        );
+        if !group_action.is_none() {
+            action = group_action;
+        }
+    }
+
+    // Templates group
+    if template_count > 0 {
+        let group_action = render_group(
+            ui,
+            "Templates",
+            SourceType::Template,
+            template_count,
+            sources,
+            config,
+            state,
+            filter,
+        );
+        if !group_action.is_none() {
+            action = group_action;
+        }
+    }
+
+    // Empty state
+    if data_source_count + indicator_count + drawing_count + template_count == 0 && !has_folders {
+        render_empty_state(ui, state.has_filter());
+    }
+
+    action
+}
+
+/// Render a group with header and items
+fn render_group(
+    ui: &mut Ui,
+    name: &str,
+    source_type: SourceType,
+    count: usize,
+    sources: &mut [SourceItem],
+    config: &ObjectTreeConfig,
+    state: &mut ObjectTreeState,
+    filter: &str,
+) -> ObjectTreeAction {
+    let mut action = ObjectTreeAction::None;
+    let is_expanded = state.is_group_expanded(name);
+
+    // Group header
+    ui.horizontal(|ui| {
+        // Expand/collapse button
+        let icon = if is_expanded {
+            &icons::CHEVRON_DOWN
+        } else {
+            &icons::CHEVRON_RIGHT
+        };
+        if IconButton::new(icon)
+            .size(ButtonSize::SM)
+            .tooltip(format!("Toggle {name}"))
+            .show(ui)
+            .clicked()
+        {
+            state.toggle_group(name);
+        }
+
+        // Group icon and name
+        let icon_rect = ui
+            .allocate_space(Vec2::splat(DESIGN_TOKENS.sizing.icon_sm))
+            .1;
+        source_type
+            .icon()
+            .as_image_tinted(
+                Vec2::splat(DESIGN_TOKENS.sizing.icon_sm),
+                ui.visuals().widgets.noninteractive.fg_stroke.color,
+            )
+            .paint_at(ui, icon_rect);
+        ui.strong_label(name);
+
+        // Item count badge
+        if config.show_item_counts {
+            ui.label(
+                RichText::new(format!("({count})"))
+                    .size(11.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+        }
+    });
+
+    // Group content
+    if is_expanded {
+        ui.indent(name, |ui| {
+            // Sort by z-index for drawings
+            let items: Vec<_> = sources
+                .iter_mut()
+                .filter(|s| {
+                    s.source_type == source_type
+                        && (!s.is_drawing() || s.folder.is_empty())
+                        && matches_filter(s, filter, state)
+                })
+                .collect();
+
+            for item in items {
+                let item_action = render_item_row(ui, item, config, state, 0);
+                if !item_action.is_none() {
+                    action = item_action;
+                }
+            }
+            if source_type == SourceType::Drawing {
+                let next = super::folders::render_folders(ui, sources, config, state, filter);
+                if !next.is_none() {
+                    action = next;
+                }
+            }
+        });
+    }
+
+    action
+}
+
+/// Render flat list (no groups)
+fn render_flat_tree(
+    ui: &mut Ui,
+    sources: &mut [SourceItem],
+    config: &ObjectTreeConfig,
+    state: &mut ObjectTreeState,
+    filter: &str,
+) -> ObjectTreeAction {
+    let mut action = ObjectTreeAction::None;
+
+    let has_folders = state
+        .folders
+        .iter()
+        .any(|path| super::folders::matches_folder_filter(path, sources, state, filter));
+    let visible_items: Vec<_> = sources
+        .iter_mut()
+        .filter(|s| matches_filter(s, filter, state))
+        .collect();
+
+    if visible_items.is_empty() && !has_folders {
+        render_empty_state(ui, state.has_filter());
+        return action;
+    }
+
+    for item in visible_items
+        .into_iter()
+        .filter(|s| !s.is_drawing() || s.folder.is_empty())
+    {
+        let item_action = render_item_row(ui, item, config, state, 0);
+        if !item_action.is_none() {
+            action = item_action;
+        }
+    }
+
+    let folder_action = super::folders::render_folders(ui, sources, config, state, filter);
+    if !folder_action.is_none() {
+        action = folder_action;
+    }
+    action
+}
+
+/// Check if item matches current filter
+pub(super) fn matches_filter(item: &SourceItem, filter: &str, state: &ObjectTreeState) -> bool {
+    // Type filter
+    if let Some(filter_type) = state.filter_type
+        && item.source_type != filter_type
+    {
+        return false;
+    }
+
+    // Hidden objects filter
+    if !item.visible {
+        // Could add a config option for this
+        // For now, always show
+    }
+
+    // Text filter
+    if !filter.is_empty() {
+        let name_matches = item.name.to_lowercase().contains(filter);
+        let label_matches = item
+            .label
+            .as_ref()
+            .map(|l| l.to_lowercase().contains(filter))
+            .unwrap_or(false);
+        let params_matches = item
+            .parameters
+            .as_ref()
+            .map(|p| p.to_lowercase().contains(filter))
+            .unwrap_or(false);
+
+        let folder_matches = item.is_drawing()
+            && item
+                .folder
+                .iter()
+                .any(|name| name.to_lowercase().contains(filter));
+        if !name_matches && !label_matches && !params_matches && !folder_matches {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Render empty state message
+fn render_empty_state(ui: &mut Ui, has_filter: bool) {
+    ui.space_xl();
+    ui.vertical_centered(|ui| {
+        if has_filter {
+            ui.label(
+                RichText::new(l10n::text(ui.ctx(), "No matching objects"))
+                    .weak()
+                    .italics(),
+            );
+            ui.hint_label("Try a different search");
+        } else {
+            ui.label(
+                RichText::new(l10n::text(ui.ctx(), "No objects"))
+                    .weak()
+                    .italics(),
+            );
+            ui.hint_label("Add indicators or drawings to see them here");
+        }
+    });
+    ui.space_xl();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn main_series_is_rendered_in_both_views_and_with_a_type_filter() {
+        for grouped in [true, false] {
+            for filtered in [true, false] {
+                let ctx = egui::Context::default();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let mut state = ObjectTreeState::new();
+                    state.filter_type = filtered.then_some(SourceType::DataSource);
+                    let mut sources = [SourceItem::data_source(1, "SIM · 1D")];
+                    render_source_tree(
+                        ui,
+                        &mut sources,
+                        &ObjectTreeConfig {
+                            group_by_type: grouped,
+                            ..Default::default()
+                        },
+                        &mut state,
+                    );
+                });
+                output.textures_delta.clear();
+                assert!(output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "SIM · 1D")
+                }), "main series missing: grouped={grouped}, filtered={filtered}");
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+}

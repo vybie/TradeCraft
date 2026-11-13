@@ -1,0 +1,155 @@
+use super::clamp_param;
+use crate::model::Bar;
+use crate::studies::palette;
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Market Facilitation Index (MFI / BW MFI)
+/// Developed by Bill Williams
+/// Measures price movement per unit of volume
+#[derive(Clone)]
+pub struct MarketFacilitationIndex {
+    /// Divisor for volume (typically 1 for crypto, 1000000 for stocks)
+    divisor: f64,
+    values: IndicatorValues,
+    color: Color32,
+    visible: bool,
+}
+
+impl MarketFacilitationIndex {
+    /// Create with the default plot colors.
+    pub fn new() -> Self {
+        Self {
+            divisor: 1.0,
+            values: IndicatorValues::new(),
+            color: palette::UP, // Teal
+            visible: true,
+        }
+    }
+
+    /// Set the volume divisor, clamped into `f64::EPSILON` to `f64::MAX`, NaN to `f64::EPSILON`.
+    pub fn with_divisor(mut self, divisor: f64) -> Self {
+        self.divisor = clamp_param(divisor, f64::EPSILON, f64::MAX);
+        self
+    }
+
+    /// Set the plot color.
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = color;
+        self
+    }
+}
+
+impl Default for MarketFacilitationIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Indicator for MarketFacilitationIndex {
+    crate::studies::inputs::study_inputs!(self;
+        divisor: number("Divisor", f64::EPSILON, f64::MAX)
+    ; {});
+
+    fn name(&self) -> &str {
+        "MFI BW"
+    }
+
+    fn desc(&self) -> &str {
+        "Market Facilitation Index - Price movement per volume"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let from = from.min(self.values.len()).min(data.len());
+        self.values.truncate(from);
+        for bar in &data[from..] {
+            let range = bar.high - bar.low;
+            let volume = bar.volume / self.divisor;
+
+            if volume == 0.0 {
+                self.values.push(IndicatorValue::None);
+            } else {
+                let mfi = range / volume;
+                self.values.push(IndicatorValue::Single(mfi));
+            }
+        }
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        vec![self.color]
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if !colors.is_empty() {
+            self.color = colors[0];
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        vec!["MFI".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_bar(high: f64, low: f64, volume: f64) -> Bar {
+        Bar {
+            time: Utc::now(),
+            open: (high + low) / 2.0,
+            high,
+            low,
+            close: (high + low) / 2.0,
+            volume,
+            colors: None,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn test_mfi_calculation() {
+        let mut mfi = MarketFacilitationIndex::new();
+        // Williams' range/volume by hand: 4/1000=.004, 5/2000=.0025;
+        // division by zero has no value.
+        let data = [
+            make_bar(102.0, 98.0, 1000.0),
+            make_bar(105.0, 100.0, 2000.0),
+            make_bar(102.0, 98.0, 0.0),
+        ];
+        mfi.calculate(&data);
+        assert_eq!(mfi.values().len(), 3);
+        for (bar, want) in [Some(0.004), Some(0.0025), None].into_iter().enumerate() {
+            assert_eq!(mfi.values().value(0, bar), want, "bar {bar}");
+        }
+    }
+}

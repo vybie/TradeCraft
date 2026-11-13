@@ -1,0 +1,583 @@
+//! Indicator factory for dynamic indicator creation by name.
+//!
+//! The [`IndicatorFactory`] provides a registry of constructor functions
+//! keyed by indicator name strings. The built-in catalogue is
+//! registered under its canonical [`Indicator::name`] key and a category,
+//! and users can add their own at runtime. It is the catalogue of studies: a
+//! picker lists [`list`](IndicatorFactory::list), describes each entry with
+//! [`Indicator::desc`] and [`category`](IndicatorFactory::category), and
+//! creates it with [`create`](IndicatorFactory::create).
+//!
+//! # Example
+//!
+//! ```rust
+//! use egui_charts::studies::IndicatorFactory;
+//!
+//! let factory = IndicatorFactory::new(); // includes all built-ins
+//! let rsi = factory.create("RSI").unwrap();
+//! assert_eq!(rsi.name(), "RSI");
+//!
+//! // Register a custom entry
+//! let mut factory = factory;
+//! factory.register("MySMA", || Box::new(egui_charts::studies::SMA::new(42)));
+//! ```
+
+use crate::data::OrderFlowKind;
+use crate::studies::*;
+use std::collections::HashMap;
+
+/// Type alias for indicator constructor closures stored in the factory.
+type IndicatorConstructor = Box<dyn Fn() -> Box<dyn Indicator> + Send + Sync>;
+
+/// Register every listed built-in indicator type with the factory, under its category.
+///
+/// Each indicator is constructed through its [`Default`] implementation --
+/// the single canonical source of its conventional parameters -- and keyed by
+/// the [`Indicator::name`] it reports. Keying off `name()` keeps the registry
+/// in lock-step with the indicators themselves: a name can never drift from
+/// the value the rendering layer and legends display, and a new indicator is
+/// reachable through the factory the moment it is added to this list.
+macro_rules! register_builtins {
+    (@help $factory:expr, $kind:literal, $($ty:ty),+ $(,)?) => {
+        $($factory.help_urls.insert(
+            std::any::type_name::<$ty>(),
+            concat!("https://userfrm.github.io/egui-charts/docs/api/egui_charts/studies/", $kind, ".", stringify!($ty), ".html"),
+        );)+
+    };
+    ($factory:expr, $($category:literal => [$($ty:ty),+ $(,)?]),+ $(,)?) => {
+        $($(
+            // Read the canonical name from a throwaway default instance so the
+            // key is always exactly what the indicator reports at runtime.
+            let key = <$ty as Default>::default().name().to_string();
+            register_builtins!(@help $factory, "struct", $ty);
+            $factory.constructors.insert(
+                key,
+                (Some($category), Box::new(|| Box::new(<$ty as Default>::default()))),
+            );
+        )+)+
+    };
+}
+
+/// A factory that creates [`Indicator`] instances by name.
+///
+/// On construction, catalogue studies are registered under their canonical
+/// [`Indicator::name`] (e.g. `"SMA"`, `"RSI"`, `"MACD"`, `"SuperTrend"`) using
+/// its conventional default parameters. Each name selects a distinct calculation
+/// or source range. Additional indicators can be registered at runtime with
+/// [`register`](Self::register).
+///
+/// [`create`](Self::create) and [`has`](Self::has) also resolve the names of seven exported
+/// studies the catalogue leaves out, so that a template, a copied study or a saved layout of
+/// one is recreated: `CVD`, `C2C Vol`, `HL2`, `HLC3`, `Price Channel`, `Ehlers Fisher` and
+/// `MA Combination`, which creates [`MACombination::ribbon`] for its inputs to reshape. They have
+/// no category and are not in [`list`](Self::list) or [`count`](Self::count).
+pub struct IndicatorFactory {
+    /// The category of each name, `None` for a built-in outside the catalogue, and its constructor.
+    constructors: HashMap<String, (Option<&'static str>, IndicatorConstructor)>,
+    help_urls: HashMap<&'static str, &'static str>,
+    defaults: HashMap<String, StudyTemplate>,
+}
+
+impl IndicatorFactory {
+    /// The category of every indicator added with [`register`](Self::register).
+    pub const CUSTOM: &'static str = "Custom";
+    /// The category of the user's own studies, such as scripts the host compiles or imports;
+    /// a study browser lists them as the user's scripts.
+    pub const PERSONAL: &'static str = "Personal";
+    /// The category of studies the host obtains from other users.
+    pub const COMMUNITY: &'static str = "Community";
+    /// The category of the built-in volume and time price profiles.
+    pub const PROFILES: &'static str = "Profiles";
+    /// The category of the built-in pattern detectors.
+    pub const PATTERNS: &'static str = "Patterns";
+    /// The category of studies computed from trades, quotes or the order book.
+    pub const ORDER_FLOW: &'static str = "Order flow";
+
+    /// Create a factory with the built-in catalogue enabled by the current features.
+    pub fn new() -> Self {
+        let mut factory = Self {
+            constructors: HashMap::new(),
+            help_urls: HashMap::new(),
+            defaults: HashMap::new(),
+        };
+
+        factory.register_builtin();
+        factory
+    }
+
+    /// Register every built-in indicator under its canonical name.
+    ///
+    /// Types use their defaults; automatic drawings select a construction kind and
+    /// stream studies select aggregation parameters. Names come from each study.
+    /// Exported studies outside the catalogue are registered first, without a category, so a
+    /// listed study of the same name would replace them.
+    fn register_builtin(&mut self) {
+        // Exported studies outside the catalogue, resolved by name so that saved copies load.
+        register_builtins!(@help self, "struct", CVD, CloseToCloseVol, HL2, HLC3, PriceChannel, EhlersFisher, MACombination, OrderFlowStudy, ChartPatterns, OptionsVolumeProfile);
+        #[cfg(feature = "drawings")]
+        register_builtins!(@help self, "struct", AutoDrawing);
+        let unlisted: [fn() -> Box<dyn Indicator>; 7] = [
+            || Box::new(CVD::default()),
+            || Box::new(CloseToCloseVol::default()),
+            || Box::new(HL2::default()),
+            || Box::new(HLC3::default()),
+            || Box::new(PriceChannel::default()),
+            || Box::new(EhlersFisher::default()),
+            || Box::new(MACombination::ribbon()),
+        ];
+        for constructor in unlisted {
+            self.constructors.insert(
+                constructor().name().to_owned(),
+                (None, Box::new(constructor)),
+            );
+        }
+        register_builtins!(
+            self,
+            "Moving averages" => [
+                SMA,
+                EMA,
+                WMA,
+                DEMA,
+                TEMA,
+                HMA,
+                ALMA,
+                VWMA,
+                LSMA,
+                SWMA,
+                KAMA,
+                SmoothedMA,
+                GuppyMA,
+                McGinleyDynamic,
+                VIDYA,
+                ZLEMA,
+                HammingMA,
+                MultipleMA,
+                MAChannel,
+                EMACross,
+                MACross,
+                MixedMACross,
+                TripleMA,
+                MARibbon,
+            ],
+            "Momentum" => [
+                RSI,
+                MACD,
+                VolumeWeightedMACD,
+                Stochastic,
+                StochasticRSI,
+                WilliamsR,
+                CCI,
+                Momentum,
+                RateOfChange,
+                Aroon,
+                AwesomeOscillator,
+                RsiDivergence,
+                KnoxvilleDivergence,
+                TechnicalRatings,
+                UltimateOscillator,
+                ConnorsRSI,
+                CoppockCurve,
+                TRIX,
+                ElderRay,
+                FisherTransform,
+                ForceIndex,
+                MassIndex,
+                DetrendedPriceOscillator,
+                KDJ,
+                PrettyGoodOscillator,
+                ChandeMomentumOscillator,
+                TrueStrengthIndex,
+                StochasticMomentumIndex,
+                SchaffTrendCycle,
+                RelativeVigorIndex,
+                DoubleStochastic,
+                CenterOfGravity,
+                KnowSureThing,
+                RainbowOscillator,
+                UltimateMomentum,
+                PriceOscillator,
+                PercentageVolumeOscillator,
+                VolumeOscillator,
+                BalanceOfPower,
+                EaseOfMovement,
+                AcceleratorOscillator,
+                AroonOscillator,
+                BullBearPower,
+                AdvanceDeclineRatioBars,
+                PriceMomentumOscillator,
+                PringsSpecialK,
+                SMIErgodicIndicator,
+                SMIErgodicOscillator,
+                WoodiesCCI,
+            ],
+            "Trend" => [
+                ADX,
+                AdxBreakout,
+                SuperTrend,
+                IchimokuCloud,
+                ParabolicSAR,
+                DirectionalMovement,
+                VortexIndicator,
+                SqueezeMomentum,
+                TrendIntensityIndex,
+                TrendDetectionIndex,
+                Qstick,
+                ChoppinessIndex,
+                ElderImpulseSystem,
+                WilliamsAlligator,
+                ChopZone,
+                VolatilityStop,
+                ChandeKrollStop,
+            ],
+            "Volatility" => [
+                BollingerBands,
+                BollingerBandsWidth,
+                ATR,
+                TrueRange,
+                KeltnerChannels,
+                DonchianChannels,
+                StandardDeviation,
+                HistoricalVolatility,
+                ChaikinVolatility,
+                ChandelierExit,
+                AccelerationBands,
+                Envelopes,
+                PercentB,
+                OhlcVolatility,
+                ParkinsonVol,
+                ZeroTrendVol,
+                CommoditySelectionIndex,
+                AverageDailyRange,
+                BBTrend,
+                UlcerIndex,
+                RelativeVolatilityIndex,
+                Median,
+            ],
+            "Volume" => [
+                Volume,
+                UpDownVolume,
+                VolumeDelta,
+                CumulativeVolumeDelta,
+                OnBalanceVolume,
+                VolumeWeightedAvgPrice,
+                AnchoredVWAP,
+                VwapAutoAnchored,
+                TimeWeightedAvgPrice,
+                MoneyFlowIndex,
+                AccumulationDistribution,
+                ChaikinMoneyFlow,
+                VolumeRateOfChange,
+                KlingerOscillator,
+                NetVolume,
+                VolumePriceTrend,
+                PriceVolumeTrendStudy,
+                NegativeVolumeIndex,
+                PositiveVolumeIndex,
+                WilliamsAD,
+                MarketFacilitationIndex,
+                ChaikinOscillator,
+                Volume24h,
+                RelativeVolumeAtTime,
+            ],
+            "Profiles" => [
+                VolProfileVisible,
+                VolProfileFixed,
+                VolProfileSession,
+                VolProfilePeriodic,
+                VolProfileAnchored,
+                VolProfileAutoAnchored,
+                TimePriceOpportunity,
+            ],
+            "Support and resistance" => [
+                PivotPoints,
+                PivotPointsHighLow,
+                Reversal,
+                ElliottWave,
+                RisingWedge,
+                FallingWedge,
+                MissedPivots,
+                KeyLevels,
+                IntradayPivotPoints,
+                ProjectedPivotPoints,
+                WilliamsFractals,
+                ZigZag,
+            ],
+            "Statistics" => [
+                LinearRegression,
+                LinearRegressionChannel,
+                LinearRegressionSlope,
+                TrendStrengthIndex,
+                StandardError,
+                StandardErrorBands,
+                RankCorrelationIndex,
+                Ratio,
+                Spread,
+                Correlation,
+                RciRibbon,
+                MajorityRule,
+                AccumulationSwingIndex,
+                Seasonality,
+                LunarPhases,
+                Performance,
+            ],
+            "Price" => [
+                HigherIntervalCandles,
+                BollingerBars,
+                TypicalPrice,
+                MedianPrice,
+                WeightedClose,
+                OHLC4,
+                VisibleAveragePrice,
+            ],
+            "Market structure" => [
+                Week52HighLow,
+                Week52HighLowLevels,
+                TradingSessions,
+                Gaps,
+            ],
+            "Market breadth" => [
+                AdvanceDeclineRatio,
+                AdvanceDeclineLine,
+                CumulativeVolumeIndex,
+            ],
+            "Patterns" => [
+                CandlestickPatterns,
+            ],
+        );
+        for kind in [
+            OrderFlowKind::Spread,
+            OrderFlowKind::BookSize {
+                levels: 10,
+                distance: 0.0,
+            },
+            OrderFlowKind::TradeRate {
+                volume: false,
+                seconds: 60,
+                instant: 3,
+            },
+            OrderFlowKind::AggressorRate {
+                seconds: 60,
+                instant: 3,
+            },
+            OrderFlowKind::LevelsExecuted {
+                seconds: 0,
+                reversal: false,
+            },
+            OrderFlowKind::SizeDelta {
+                ranges: [[0.0, 9.0], [10.0, 99.0], [100.0, f64::MAX]],
+            },
+            OrderFlowKind::FlowSum { bars: 10 },
+            OrderFlowKind::FilteredCvd {
+                min: 100.0,
+                max: f64::MAX,
+            },
+            OrderFlowKind::LevelsTradedThrough { seconds: 0 },
+        ] {
+            let name = OrderFlowStudy::new(kind).name().to_owned();
+            self.constructors.insert(
+                name,
+                (
+                    Some(Self::ORDER_FLOW),
+                    Box::new(move || Box::new(OrderFlowStudy::new(kind))),
+                ),
+            );
+        }
+        register_builtins!(@help self, "type", SMIErgodicIndicator, SMIErgodicOscillator, RisingWedge, FallingWedge, Ratio, Spread, Correlation, AdvanceDeclineRatio, AdvanceDeclineLine, CumulativeVolumeIndex);
+        for cumulative in [false, true] {
+            let name = OrderFlowStudy::execution_delta(cumulative)
+                .name()
+                .to_owned();
+            self.constructors.insert(
+                name,
+                (
+                    Some(Self::ORDER_FLOW),
+                    Box::new(move || Box::new(OrderFlowStudy::execution_delta(cumulative))),
+                ),
+            );
+        }
+        for family in PatternFamily::ALL {
+            let name = ChartPatterns::new(family).name().to_owned();
+            self.constructors.insert(
+                name,
+                (
+                    Some(Self::PATTERNS),
+                    Box::new(move || Box::new(ChartPatterns::new(family))),
+                ),
+            );
+        }
+        #[cfg(feature = "drawings")]
+        for kind in AutoDrawingKind::ALL {
+            let name = AutoDrawing::new(kind, 5.0, 10).name().to_owned();
+            self.constructors.insert(
+                name,
+                (
+                    Some("Support and resistance"),
+                    Box::new(move || Box::new(AutoDrawing::new(kind, 5.0, 10).with_atr(3.0, 10))),
+                ),
+            );
+        }
+    }
+
+    /// Register a named indicator constructor in the [`CUSTOM`](Self::CUSTOM) category.
+    ///
+    /// A constructor already registered under `name`, a built-in included, is replaced. Returns
+    /// `false`, registering nothing, when `name` is empty or only whitespace.
+    ///
+    /// # Arguments
+    /// * `name` -- The lookup key (e.g. `"MySMA"`).
+    /// * `constructor` -- A closure that returns a new boxed indicator.
+    pub fn register<F>(&mut self, name: impl Into<String>, constructor: F) -> bool
+    where
+        F: Fn() -> Box<dyn Indicator> + Send + Sync + 'static,
+    {
+        self.register_in(Self::CUSTOM, name, constructor)
+    }
+
+    /// Register a named indicator constructor in `category`, such as [`PERSONAL`](Self::PERSONAL)
+    /// for a script the user imported, [`COMMUNITY`](Self::COMMUNITY) or
+    /// [`PROFILES`](Self::PROFILES) or [`ORDER_FLOW`](Self::ORDER_FLOW).
+    ///
+    /// A constructor already registered under `name`, a built-in included, is replaced. Returns
+    /// `false`, registering nothing, when `name` is empty or only whitespace.
+    pub fn register_in<F>(
+        &mut self,
+        category: &'static str,
+        name: impl Into<String>,
+        constructor: F,
+    ) -> bool
+    where
+        F: Fn() -> Box<dyn Indicator> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return false;
+        }
+        self.defaults.remove(&name);
+        self.constructors
+            .insert(name, (Some(category), Box::new(constructor)));
+        true
+    }
+
+    /// Set the inputs and presentation used by subsequent [`create`](Self::create) calls.
+    /// Each template replaces the defaults for its registered name; other names retain theirs.
+    /// An empty list changes nothing, and the last template for a repeated name wins.
+    /// Defaults saved under earlier input ids are upgraded like saved templates.
+    /// Invalid names, inputs or settings reject the entire batch without changing any defaults.
+    /// Existing studies, saved templates, layouts, clipboard copies and alert studies keep their
+    /// own settings.
+    /// Replacing or removing a constructor discards its defaults.
+    ///
+    /// Capture a study with [`StudyTemplate::from_study`], edit its typed inputs or settings,
+    /// then pass it here. A chooser supplied this factory through `IndicatorDialog::with_factory`
+    /// uses the same defaults. Explicit edits to a created study take precedence.
+    ///
+    /// ```
+    /// use egui_charts::studies::{IndicatorFactory, InputValue, StudyTemplate};
+    /// let mut factory = IndicatorFactory::new();
+    /// let mut defaults = StudyTemplate::from_study(factory.create("SMA").unwrap().as_ref());
+    /// defaults.inputs = vec![("period".into(), InputValue::Length(5))];
+    /// defaults.settings.plots[0].width = 3.0;
+    /// factory.set_defaults(&[defaults])?;
+    /// assert_eq!(factory.create("SMA").unwrap().plot_style(0).width, 3.0);
+    /// # Ok::<(), egui_charts::studies::StudyError>(())
+    /// ```
+    pub fn set_defaults(&mut self, defaults: &[StudyTemplate]) -> Result<(), StudyError> {
+        for template in defaults {
+            template.create_with(self)?;
+        }
+        for template in defaults {
+            self.defaults
+                .insert(template.name.clone(), template.clone());
+        }
+        Ok(())
+    }
+
+    /// Discard the host defaults for `name`. Returns whether defaults were removed.
+    /// Subsequent creations use the registered constructor's values again.
+    pub fn clear_defaults(&mut self, name: &str) -> bool {
+        self.defaults.remove(name).is_some()
+    }
+
+    /// Create an indicator by its registered name with the host's defaults, or `None` if not
+    /// found or if the constructor no longer accepts those defaults. Without host defaults,
+    /// returns the constructor's study unchanged.
+    pub fn create(&self, name: &str) -> Option<Box<dyn Indicator>> {
+        if let Some(template) = self.defaults.get(name) {
+            return template.create_with(self).ok();
+        }
+        self.create_registered(name)
+    }
+
+    /// Reconstruct saved state without applying defaults intended for new studies.
+    pub(crate) fn create_registered(&self, name: &str) -> Option<Box<dyn Indicator>> {
+        self.constructors.get(name).map(|(_, f)| f())
+    }
+
+    /// The category of the indicator registered under `name`, such as `"Momentum"` or
+    /// `"Volume"` for a built-in and [`CUSTOM`](Self::CUSTOM) for one added with
+    /// [`register`](Self::register), or `None` if not found or left out of the catalogue.
+    pub fn category(&self, name: &str) -> Option<&'static str> {
+        self.constructors
+            .get(name)
+            .and_then(|(category, _)| *category)
+    }
+
+    /// The names a study picker offers, unordered: every registered name except the exported
+    /// studies outside the catalogue.
+    pub fn list(&self) -> Vec<String> {
+        self.constructors
+            .iter()
+            .filter(|(_, (category, _))| category.is_some())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Whether [`create`](Self::create) resolves `name`, also one that [`list`](Self::list)
+    /// leaves out.
+    pub fn has(&self, name: &str) -> bool {
+        self.constructors.contains_key(name)
+    }
+
+    /// Remove the indicator registered under `name`.
+    ///
+    /// Returns `true` if it was present and removed, `false` otherwise.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.defaults.remove(name);
+        self.constructors.remove(name).is_some()
+    }
+
+    /// Remove all registered indicators, including built-ins.
+    pub fn clear(&mut self) {
+        self.defaults.clear();
+        self.constructors.clear();
+    }
+
+    /// The number of names in [`list`](Self::list).
+    pub fn count(&self) -> usize {
+        self.constructors
+            .values()
+            .filter(|(category, _)| category.is_some())
+            .count()
+    }
+}
+
+impl Default for IndicatorFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Resolve the built-in articles once so direct constructors retain the same help as the chooser.
+pub(crate) fn builtin_help_url(study_type: &str) -> Option<&'static str> {
+    static CATALOGUE: std::sync::OnceLock<HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    CATALOGUE
+        .get_or_init(|| IndicatorFactory::new().help_urls)
+        .get(study_type)
+        .copied()
+}
+
+#[cfg(test)]
+mod builtin_properties;
+#[cfg(test)]
+mod tests;

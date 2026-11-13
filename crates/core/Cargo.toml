@@ -1,0 +1,10 @@
+[package]
+name = "tradecraft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+serde = { version = "1", features = ["derive"] }

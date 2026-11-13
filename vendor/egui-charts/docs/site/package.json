@@ -1,0 +1,15 @@
+{
+  "name": "egui-charts-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --test prepare-guides.test.mjs remark-docs.test.mjs check-api-links.test.mjs tour.test.mjs && node prepare-guides.mjs && astro build && node --test progress.test.mjs && cargo doc --manifest-path ../../Cargo.toml --no-deps --all-features && node check-api-links.mjs",
+    "dev": "node prepare-guides.mjs && astro dev"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.5",
+    "@astrojs/starlight": "0.42.8",
+    "astro": "7.4.4",
+    "parse5": "8.1.0"
+  }
+}

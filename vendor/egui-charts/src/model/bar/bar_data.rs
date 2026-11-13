@@ -1,0 +1,313 @@
+//! Bar Data Container
+//!
+//! A collection of bars with utility methods for aggregation and analysis.
+
+use super::bar::Bar;
+
+/// Container for multiple bars with utility methods
+///
+/// This container provides common operations over bar collections.
+///
+/// # Example
+///
+/// ```
+/// use egui_charts::model::BarData;
+///
+/// let data = BarData::new();
+/// assert!(data.is_empty());
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct BarData {
+    /// Bars in caller-supplied order; construction does not sort or validate them.
+    pub bars: Vec<Bar>,
+}
+
+impl BarData {
+    /// Creates a new empty BarData
+    pub fn new() -> Self {
+        Self { bars: Vec::new() }
+    }
+
+    /// Creates BarData with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bars: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Creates BarData from a vector of bars
+    pub fn from_bars(bars: Vec<Bar>) -> Self {
+        Self { bars }
+    }
+
+    /// Adds a bar to the dataset
+    pub fn push(&mut self, bar: Bar) {
+        self.bars.push(bar);
+    }
+
+    /// Returns the number of bars
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+
+    /// Returns true if there are no bars
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
+
+    /// Clear all bars
+    pub fn clear(&mut self) {
+        self.bars.clear();
+    }
+
+    /// Get the first bar
+    pub fn first(&self) -> Option<&Bar> {
+        self.bars.first()
+    }
+
+    /// Get the last bar
+    pub fn last(&self) -> Option<&Bar> {
+        self.bars.last()
+    }
+
+    /// Get a bar by index
+    pub fn get(&self, index: usize) -> Option<&Bar> {
+        self.bars.get(index)
+    }
+
+    /// Get a mutable reference to a bar by index
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut Bar> {
+        self.bars.get_mut(index)
+    }
+
+    /// Iterate over bars
+    pub fn iter(&self) -> impl Iterator<Item = &Bar> {
+        self.bars.iter()
+    }
+
+    // ============= Aggregation Methods =============
+
+    /// Returns the min price (low) across all bars.
+    ///
+    /// Non-finite values are skipped; `None` when no finite value remains.
+    pub fn min_price(&self) -> Option<f64> {
+        self.bars
+            .iter()
+            .map(|c| c.low)
+            .filter(|v| v.is_finite())
+            .min_by(f64::total_cmp)
+    }
+
+    /// Returns the max price (high) across all bars.
+    ///
+    /// Non-finite values are skipped; `None` when no finite value remains.
+    pub fn max_price(&self) -> Option<f64> {
+        self.bars
+            .iter()
+            .map(|c| c.high)
+            .filter(|v| v.is_finite())
+            .max_by(f64::total_cmp)
+    }
+
+    /// Returns the price range (max_high - min_low)
+    pub fn price_range(&self) -> Option<(f64, f64)> {
+        let min = self.min_price()?;
+        let max = self.max_price()?;
+        Some((min, max))
+    }
+
+    /// Returns the max volume across all bars.
+    ///
+    /// Non-finite values are skipped; `None` when no finite value remains.
+    pub fn max_volume(&self) -> Option<f64> {
+        self.bars
+            .iter()
+            .map(|c| c.volume)
+            .filter(|v| v.is_finite())
+            .max_by(f64::total_cmp)
+    }
+
+    /// Returns the total volume across all bars
+    pub fn total_volume(&self) -> f64 {
+        self.bars.iter().map(|c| c.volume).sum()
+    }
+
+    /// Returns the average volume across all bars
+    pub fn avg_volume(&self) -> Option<f64> {
+        if self.bars.is_empty() {
+            return None;
+        }
+        Some(self.total_volume() / self.bars.len() as f64)
+    }
+
+    // ============= Transformation Methods =============
+
+    /// Converts regular OHLC bars to Heikin-Ashi bars
+    ///
+    /// Heikin-Ashi is a Japanese candlestick technique that filters out market noise
+    /// and highlights trends more clearly than traditional candlesticks.
+    ///
+    /// # Formula
+    /// - HA Close = (Open + High + Low + Close) / 4
+    /// - HA Open = (Previous HA Open + Previous HA Close) / 2
+    /// - HA High = Max(High, HA Open, HA Close)
+    /// - HA Low = Min(Low, HA Open, HA Close)
+    ///
+    /// A whitespace bar stays whitespace, and the bar after it continues from the last bar with
+    /// a value.
+    pub fn to_heikin_ashi(&self) -> Self {
+        let mut ha_bars = Vec::with_capacity(self.bars.len());
+        Self::extend_heikin_ashi(&mut ha_bars, &self.bars);
+        Self::from_bars(ha_bars)
+    }
+
+    /// Appends the Heikin-Ashi candles of `bars` to `ha_bars`, the candles of the bars before them.
+    pub(crate) fn extend_heikin_ashi(ha_bars: &mut Vec<Bar>, bars: &[Bar]) {
+        for bar in bars {
+            if bar.is_whitespace() {
+                ha_bars.push(Bar::whitespace(bar.time));
+                continue;
+            }
+            let ha_close = (bar.open + bar.high + bar.low + bar.close) / 4.0;
+            let (ha_open, ha_high, ha_low) =
+                match ha_bars.iter().rev().find(|ha| !ha.is_whitespace()) {
+                    Some(prev) => {
+                        let open = (prev.open + prev.close) / 2.0;
+                        (
+                            open,
+                            bar.high.max(open).max(ha_close),
+                            bar.low.min(open).min(ha_close),
+                        )
+                    }
+                    // The first candle has no previous one to continue from.
+                    None => ((bar.open + bar.close) / 2.0, bar.high, bar.low),
+                };
+            ha_bars.push(Bar::new(
+                bar.time, ha_open, ha_high, ha_low, ha_close, bar.volume,
+            ));
+        }
+    }
+
+    /// Returns a clone of the bar data (for regular candlesticks)
+    ///
+    /// This method exists for API consistency when switching between chart types.
+    pub fn to_regular(&self) -> Self {
+        self.clone()
+    }
+
+    /// Get a slice of bars within an index range
+    pub fn slice(&self, start: usize, end: usize) -> &[Bar] {
+        let end = end.min(self.bars.len());
+        let start = start.min(end);
+        &self.bars[start..end]
+    }
+}
+
+impl IntoIterator for BarData {
+    type Item = Bar;
+    type IntoIter = std::vec::IntoIter<Bar>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.bars.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a BarData {
+    type Item = &'a Bar;
+    type IntoIter = std::slice::Iter<'a, Bar>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.bars.iter()
+    }
+}
+
+impl FromIterator<Bar> for BarData {
+    fn from_iter<I: IntoIterator<Item = Bar>>(iter: I) -> Self {
+        Self {
+            bars: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl std::ops::Index<usize> for BarData {
+    type Output = Bar;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.bars[index]
+    }
+}
+
+impl std::ops::IndexMut<usize> for BarData {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.bars[index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn create_test_bars() -> BarData {
+        let now = Utc::now();
+        BarData::from_bars(vec![
+            Bar::new(now, 100.0, 110.0, 95.0, 105.0, 1000.0),
+            Bar::new(now, 105.0, 115.0, 100.0, 110.0, 1500.0),
+            Bar::new(now, 110.0, 120.0, 105.0, 115.0, 1200.0),
+        ])
+    }
+
+    #[test]
+    fn test_aggregations() {
+        let (nan, inf) = (f64::NAN, f64::INFINITY);
+        // (case, rows of (low, high, volume), expected (min_price, max_price, max_volume))
+        let cases = [
+            (
+                "finite only",
+                vec![
+                    (95.0, 110.0, 1000.0),
+                    (100.0, 115.0, 1500.0),
+                    (105.0, 120.0, 1200.0),
+                ],
+                (Some(95.0), Some(120.0), Some(1500.0)),
+            ),
+            (
+                "NaN first",
+                vec![(nan, nan, nan), (95.0, 110.0, 1000.0)],
+                (Some(95.0), Some(110.0), Some(1000.0)),
+            ),
+            (
+                "NaN last",
+                vec![(95.0, 110.0, 1000.0), (nan, nan, nan)],
+                (Some(95.0), Some(110.0), Some(1000.0)),
+            ),
+            (
+                "infinite high",
+                vec![(95.0, inf, 1000.0), (100.0, 110.0, 1500.0)],
+                (Some(95.0), Some(110.0), Some(1500.0)),
+            ),
+            ("all NaN", vec![(nan, nan, nan)], (None, None, None)),
+        ];
+        let now = Utc::now();
+        for (case, rows, expected) in cases {
+            let data = BarData::from_bars(
+                rows.iter()
+                    .map(|&(low, high, volume)| Bar::new(now, low, high, low, low, volume))
+                    .collect(),
+            );
+            let actual = (data.min_price(), data.max_price(), data.max_volume());
+            assert_eq!(actual, expected, "{case}");
+        }
+        assert_eq!(create_test_bars().total_volume(), 3700.0);
+    }
+
+    #[test]
+    fn test_heikin_ashi() {
+        let data = create_test_bars();
+        let ha = data.to_heikin_ashi();
+
+        // Closes average each OHLC row; opens average the preceding transformed open and close.
+        let actual: Vec<_> = ha.iter().map(|bar| (bar.open, bar.close)).collect();
+        assert_eq!(actual, [(102.5, 102.5), (102.5, 107.5), (105.0, 112.5)]);
+    }
+}

@@ -1,0 +1,235 @@
+//! Typed input schemas for built-in and host studies.
+
+pub use crate::model::{InputValue, StudySource};
+
+/// The accepted values of a study input.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum InputKind {
+    /// Inclusive integer bounds.
+    Length(usize, usize),
+    /// Inclusive signed integer bounds.
+    Integer(i32, i32),
+    /// Inclusive finite numeric bounds.
+    Number(f64, f64),
+    /// Labels in selection order.
+    Choice(Vec<String>),
+    /// An enabled or disabled input.
+    Toggle,
+    /// A price field or another study's output. The chart checks dependency availability.
+    Source,
+    /// An RGBA colour.
+    Color,
+    /// A calculation interval, or the chart interval.
+    Timeframe,
+    /// A host-resolved symbol, or the chart symbol.
+    Symbol,
+    /// Text on one line.
+    Text,
+}
+
+/// An editable input, with a stable study-local id and its current value.
+#[derive(Clone, Debug)]
+pub struct StudyInput {
+    /// Id passed to [`Indicator::set_input`](super::Indicator::set_input).
+    pub id: String,
+    /// User-facing field label.
+    pub label: String,
+    /// Current value.
+    pub value: InputValue,
+    /// Initial value, retained when the current value is edited.
+    pub default: InputValue,
+    /// Accepted values, used to build the editor.
+    pub kind: InputKind,
+    /// The choice input this one applies with and the choices it applies to. An editor hides it
+    /// under the other choices and keeps its value. `None` always shows it.
+    pub shown_when: Option<(String, Vec<usize>)>,
+}
+
+impl StudyInput {
+    /// Define an input for a host study.
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: InputValue,
+        kind: InputKind,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            default: value.clone(),
+            value,
+            kind,
+            shown_when: None,
+        }
+    }
+
+    /// Set the declared default independently of the current value.
+    pub fn with_default(mut self, value: InputValue) -> Self {
+        self.default = value;
+        self
+    }
+
+    /// Show this input only while the choice input `id` holds one of `choices`.
+    pub fn shown_when(mut self, id: impl Into<String>, choices: impl Into<Vec<usize>>) -> Self {
+        self.shown_when = Some((id.into(), choices.into()));
+        self
+    }
+
+    /// Whether an editor listing `inputs`, this one among them, shows this input.
+    pub fn is_shown(&self, inputs: &[StudyInput]) -> bool {
+        self.shown_when.as_ref().is_none_or(|(id, choices)| {
+            inputs.iter().any(|input| {
+                input.id == *id
+                    && matches!(input.value, InputValue::Choice(choice) if choices.contains(&choice))
+            })
+        })
+    }
+
+    /// Check a value against this input's schema. Setters must also validate values.
+    pub fn accepts(&self, value: &InputValue) -> bool {
+        match (&self.kind, value) {
+            (InputKind::Length(min, max), InputValue::Length(v)) => (*min..=*max).contains(v),
+            (InputKind::Integer(min, max), InputValue::Integer(v)) => (*min..=*max).contains(v),
+            (InputKind::Number(min, max), InputValue::Number(v)) => {
+                v.is_finite() && (*min..=*max).contains(v)
+            }
+            (InputKind::Choice(choices), InputValue::Choice(v)) => *v < choices.len(),
+            (InputKind::Toggle, InputValue::Toggle(_))
+            | (InputKind::Source, InputValue::Source(_))
+            | (InputKind::Color, InputValue::Color(_))
+            | (InputKind::Timeframe, InputValue::Timeframe(_)) => true,
+            (InputKind::Symbol, InputValue::Symbol(value))
+            | (InputKind::Text, InputValue::Text(value)) => {
+                value.trim() == value && !value.chars().any(char::is_control)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(feature = "studies")]
+macro_rules! input_spec {
+    ($id:expr, $value:expr, integer($label:expr, $min:expr, $max:expr)) => {
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Integer($value),
+            crate::studies::InputKind::Integer($min, $max),
+        )
+    };
+    ($id:expr, $value:expr, length($label:expr, $min:expr, $max:expr)) => {
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Length($value),
+            crate::studies::InputKind::Length($min, $max),
+        )
+    };
+    ($id:expr, $value:expr, number($label:expr, $min:expr, $max:expr)) => {
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Number($value as f64),
+            crate::studies::InputKind::Number($min, $max),
+        )
+    };
+    ($id:expr, $value:expr, choice($label:expr, $choices:expr)) => {{
+        let choices = $choices;
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Choice(
+                choices.iter().position(|v| *v == $value).unwrap_or(0),
+            ),
+            crate::studies::InputKind::Choice(choices.iter().map(|v| format!("{v:?}")).collect()),
+        )
+    }};
+    ($id:expr, $value:expr, toggle($label:expr)) => {
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Toggle($value),
+            crate::studies::InputKind::Toggle,
+        )
+    };
+    ($id:expr, $value:expr, color($label:expr)) => {
+        crate::studies::StudyInput::new(
+            $id,
+            $label,
+            crate::studies::InputValue::Color($value),
+            crate::studies::InputKind::Color,
+        )
+    };
+}
+
+#[cfg(feature = "studies")]
+macro_rules! input_assign {
+    ($value:expr, integer($($args:expr),*)) => {
+        match $value {
+            crate::studies::InputValue::Integer(v) => v,
+            _ => unreachable!(),
+        }
+    };
+    ($value:expr, length($($args:expr),*)) => {
+        match $value {
+            crate::studies::InputValue::Length(v) => v,
+            _ => unreachable!(),
+        }
+    };
+    ($value:expr, number($($args:expr),*)) => {
+        match $value {
+            crate::studies::InputValue::Number(v) => v as _,
+            _ => unreachable!(),
+        }
+    };
+    ($value:expr, choice($label:expr, $choices:expr)) => {
+        match $value {
+            crate::studies::InputValue::Choice(v) => $choices
+                .into_iter()
+                .nth(v)
+                .expect("validated study input choice"),
+            _ => unreachable!(),
+        }
+    };
+    ($value:expr, toggle($label:expr)) => {
+        match $value {
+            crate::studies::InputValue::Toggle(v) => v,
+            _ => unreachable!(),
+        }
+    };
+    ($value:expr, color($label:expr)) => {
+        match $value {
+            crate::studies::InputValue::Color(v) => v,
+            _ => unreachable!(),
+        }
+    };
+}
+
+#[cfg(feature = "studies")]
+macro_rules! study_inputs {
+    ($this:ident; $($field:ident $([$index:literal])? : $kind:ident($($args:expr),*) $(if $choice:ident in $shown:expr)?),+ $(,)? ; $($changed:ident =>)? $after:block) => {
+        fn inputs(&$this) -> Vec<crate::studies::StudyInput> {
+            let defaults = Self::default();
+            vec![$(crate::studies::inputs::input_spec!(stringify!($field $([$index])?), $this.$field $([$index])?, $kind($($args),*))
+                .with_default(crate::studies::inputs::input_spec!(stringify!($field $([$index])?), defaults.$field $([$index])?, $kind($($args),*)).value)
+                $(.shown_when(stringify!($choice), $shown))?),+]
+        }
+
+        fn set_input(&mut $this, id: &str, value: crate::studies::InputValue) -> Result<(), crate::studies::StudyError> {
+            let schema = $this.inputs().into_iter().find(|input| input.id == id).ok_or_else(|| crate::studies::StudyError::UnknownInput(id.into()))?;
+            if !schema.accepts(&value) { return Err(crate::studies::StudyError::invalid_input(id)); }
+            match id {
+                $(stringify!($field $([$index])?) => { $this.$field $([$index])? = crate::studies::inputs::input_assign!(value, $kind($($args),*)); }),+
+                _ => return Err(crate::studies::StudyError::UnknownInput(id.into())),
+            }
+            $(let $changed = id;)?
+            $after
+            $this.calculate(&[]);
+            Ok(())
+        }
+    };
+}
+
+#[cfg(feature = "studies")]
+pub(crate) use {input_assign, input_spec, study_inputs};

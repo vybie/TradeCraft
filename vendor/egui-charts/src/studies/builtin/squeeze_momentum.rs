@@ -1,0 +1,305 @@
+use super::{clamp_param, over_finite_bars};
+use crate::model::Bar;
+use crate::studies::helpers;
+use crate::studies::palette;
+use crate::studies::stepper::{update_window, usable_behind};
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Squeeze Momentum Indicator
+/// Combines Bollinger Bands and Keltner Channels to identify periods of low volatility
+/// When BB is inside KC = "squeeze" (low volatility period)
+#[derive(Clone)]
+pub struct SqueezeMomentum {
+    /// Bollinger Bands period (typically 20)
+    bb_period: usize,
+    /// Bollinger Bands standard deviation multiplier (typically 2.0)
+    bb_mult: f64,
+    /// Keltner Channel period (typically 20)
+    kc_period: usize,
+    /// Keltner Channel ATR multiplier (typically 1.5)
+    kc_mult: f64,
+    /// Momentum period (typically 12)
+    momentum_period: usize,
+    values: IndicatorValues,
+    /// Colors: [Momentum positive, Squeeze on (the squeeze line), Momentum negative, Squeeze off]
+    colors: Vec<Color32>,
+    visible: bool,
+}
+
+impl SqueezeMomentum {
+    /// Create with the default Bollinger and Keltner channel settings.
+    pub fn new() -> Self {
+        Self {
+            bb_period: 20,
+            bb_mult: 2.0,
+            kc_period: 20,
+            kc_mult: 1.5,
+            momentum_period: 12,
+            values: IndicatorValues::new(),
+            colors: vec![
+                palette::GREEN,    // Green - Momentum positive
+                palette::DISABLED, // Gray - Squeeze on
+                palette::RED,      // Red - Momentum negative
+                palette::BLUE,     // Blue - Squeeze off
+            ],
+            visible: true,
+        }
+    }
+
+    /// Set the Bollinger Bands period and multiplier; `mult` is clamped into 0
+    /// to `f64::MAX`, NaN to 0.
+    pub fn with_bb_params(mut self, period: usize, mult: f64) -> Self {
+        self.bb_period = period.max(1);
+        self.bb_mult = clamp_param(mult, 0.0, f64::MAX);
+        self
+    }
+
+    /// Set the Keltner Channel period and multiplier; `mult` is clamped into 0
+    /// to `f64::MAX`, NaN to 0.
+    pub fn with_kc_params(mut self, period: usize, mult: f64) -> Self {
+        self.kc_period = period.max(1);
+        self.kc_mult = clamp_param(mult, 0.0, f64::MAX);
+        self
+    }
+
+    /// Set plot colors in the order returned by [`Indicator::line_names`].
+    pub fn with_colors(mut self, colors: Vec<Color32>) -> Self {
+        self.colors = colors;
+        self
+    }
+
+    fn calculate_atr(data: &[Bar], period: usize) -> Vec<f64> {
+        let mut tr = Vec::with_capacity(data.len());
+        tr.push(data[0].high - data[0].low);
+
+        for i in 1..data.len() {
+            let high_low = data[i].high - data[i].low;
+            let high_close = (data[i].high - data[i - 1].close).abs();
+            let low_close = (data[i].low - data[i - 1].close).abs();
+            tr.push(high_low.max(high_close).max(low_close));
+        }
+
+        helpers::sma(&tr, period)
+    }
+
+    fn linear_regression(data: &[f64], period: usize) -> Vec<f64> {
+        let mut result = Vec::with_capacity(data.len());
+
+        for i in 0..data.len() {
+            if i < period - 1 {
+                result.push(f64::NAN);
+            } else {
+                let window = &data[i + 1 - period..=i];
+                let n = period as f64;
+
+                let sum_x: f64 = (0..period).map(|x| x as f64).sum();
+                let sum_y: f64 = window.iter().sum();
+                let sum_xy: f64 = window.iter().enumerate().map(|(x, &y)| x as f64 * y).sum();
+                let sum_xx: f64 = (0..period).map(|x| (x * x) as f64).sum();
+
+                let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+                let intercept = (sum_y - slope * sum_x) / n;
+
+                // Value at the end of the regression line
+                let value = intercept + slope * (period - 1) as f64;
+                result.push(value);
+            }
+        }
+
+        result
+    }
+}
+
+impl Default for SqueezeMomentum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SqueezeMomentum {
+    /// The values over `data`, every bar of which has finite inputs.
+    fn compute(&self, data: &[Bar]) -> IndicatorValues {
+        let mut values = IndicatorValues::new();
+        let required = self.bb_period.max(self.kc_period).max(self.momentum_period);
+        if data.len() < required {
+            for _ in 0..data.len() {
+                values.push(IndicatorValue::None);
+            }
+            return values;
+        }
+
+        // Get closes
+        let closes: Vec<f64> = data.iter().map(|b| b.close).collect();
+
+        // Calculate Bollinger Bands
+        let bb_sma = helpers::sma(&closes, self.bb_period);
+        let bb_std = helpers::stdev(&closes, self.bb_period);
+
+        // Calculate Keltner Channels
+        let kc_sma = helpers::sma(&closes, self.kc_period);
+        let atr = Self::calculate_atr(data, self.kc_period);
+
+        // Calculate midline and deviations for squeeze calculation
+        let hl2: Vec<f64> = data.iter().map(|b| (b.high + b.low) / 2.0).collect();
+        let hl2_sma = helpers::sma(&hl2, self.momentum_period);
+
+        // Calculate momentum using linear regression
+        let mut deviation = Vec::with_capacity(data.len());
+        for i in 0..data.len() {
+            if hl2_sma[i].is_nan() {
+                deviation.push(f64::NAN);
+            } else {
+                deviation.push(closes[i] - hl2_sma[i]);
+            }
+        }
+        let momentum = Self::linear_regression(&deviation, self.momentum_period);
+
+        // Store results: [momentum, squeeze_state (1.0 = squeeze on, 0.0 = off)]
+        for i in 0..data.len() {
+            if bb_sma[i].is_nan()
+                || bb_std[i].is_nan()
+                || kc_sma[i].is_nan()
+                || atr[i].is_nan()
+                || momentum[i].is_nan()
+            {
+                values.push(IndicatorValue::None);
+            } else {
+                let bb_upper = bb_sma[i] + self.bb_mult * bb_std[i];
+                let bb_lower = bb_sma[i] - self.bb_mult * bb_std[i];
+                let kc_upper = kc_sma[i] + self.kc_mult * atr[i];
+                let kc_lower = kc_sma[i] - self.kc_mult * atr[i];
+
+                // Squeeze is ON when BB is inside KC
+                let squeeze_on = bb_lower > kc_lower && bb_upper < kc_upper;
+
+                values.push_lines(&[momentum[i], if squeeze_on { 1.0 } else { 0.0 }]);
+            }
+        }
+
+        values
+    }
+}
+
+impl Indicator for SqueezeMomentum {
+    crate::studies::inputs::study_inputs!(self;
+        bb_period: length("Bb period", 1, usize::MAX),
+        bb_mult: number("Bb mult", 0.0, f64::MAX),
+        kc_period: length("Kc period", 1, usize::MAX),
+        kc_mult: number("Kc mult", 0.0, f64::MAX),
+        momentum_period: length("Momentum period", 1, usize::MAX)
+    ; {});
+
+    fn value_format(&self) -> crate::scales::StudyFormat {
+        crate::scales::StudyFormat::Price
+    }
+
+    fn name(&self) -> &str {
+        "Squeeze"
+    }
+
+    fn desc(&self) -> &str {
+        "Squeeze Momentum - Identifies volatility breakouts"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let mut values = std::mem::take(&mut self.values);
+        update_window(
+            &mut values,
+            data,
+            from,
+            usable_behind(
+                (self.bb_period - 1)
+                    .max(self.kc_period)
+                    .max((self.momentum_period - 1).saturating_mul(2)),
+                |b| b.high.is_finite() && b.low.is_finite() && b.close.is_finite(),
+            ),
+            |data| {
+                over_finite_bars(
+                    data,
+                    |b| b.high.is_finite() && b.low.is_finite() && b.close.is_finite(),
+                    |data| self.compute(data),
+                )
+            },
+        );
+        self.values = values;
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        self.colors.clone()
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if colors.len() >= 4 {
+            self.colors = colors;
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        vec!["Momentum".to_string(), "Squeeze".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studies::test_support::make_range_bar as make_bar;
+
+    #[test]
+    fn test_squeeze_calculation() {
+        let mut squeeze = SqueezeMomentum::new()
+            .with_bb_params(3, 2.0)
+            .with_kc_params(3, 1.5);
+        squeeze.momentum_period = 3;
+        let data = [
+            make_bar(102.0, 98.0, 100.0),
+            make_bar(103.0, 99.0, 101.0),
+            make_bar(104.0, 100.0, 102.0),
+            make_bar(105.0, 101.0, 103.0),
+            make_bar(106.0, 102.0, 104.0),
+            make_bar(121.0, 119.0, 120.0),
+        ];
+        squeeze.calculate(&data);
+        // By hand: deviations close-SMA(HL2,3) at bars 2..5 are 1,1,1,11.
+        // Regression endpoints on [1,1,1] and [1,1,11] are 1 and 28/3.
+        // Bar 4: BB half-width 2*sqrt(2/3) < KC 1.5*4 (squeezed).
+        // Bar 5: BB half-width 2*sqrt(182/3) > KC 1.5*(4+4+17)/3 (released).
+        assert_eq!(squeeze.values().len(), 6);
+        for bar in 0..4 {
+            assert_eq!(squeeze.values().value(0, bar), None);
+        }
+        for (bar, momentum, flag) in [(4, 1.0, 1.0), (5, 28.0 / 3.0, 0.0)] {
+            let got = squeeze.values().value(0, bar).unwrap();
+            assert!((got - momentum).abs() < 1e-12, "bar {bar}: {got}");
+            assert_eq!(squeeze.values().value(1, bar), Some(flag));
+        }
+    }
+}

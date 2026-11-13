@@ -1,0 +1,176 @@
+//! Sidebar + content two-column layout using `egui_extras::StripBuilder`.
+//!
+//! Use [`SidebarLayout`] for a fixed-width navigation column beside flexible
+//! content. Sizes use egui logical points.
+//!
+//! # Example
+//! ```
+//! # use egui_charts::ui_kit::sidebar_layout::SidebarLayout;
+//! # egui::__run_test_ui(|ui| {
+//! SidebarLayout::new(160.0)
+//!     .show(ui,
+//!         |ui| { /* sidebar navigation */ },
+//!         |ui| { /* scrollable content */ },
+//!     );
+//! # });
+//! ```
+
+use crate::localization as l10n;
+use crate::theme::ThemeExt;
+use crate::tokens::DESIGN_TOKENS;
+use egui::{Color32, Pos2, Rect, Role, Sense, Ui, Vec2, WidgetInfo};
+use egui_extras::{Size, StripBuilder};
+
+/// Two-column layout: fixed-width sidebar + flexible content area.
+///
+/// Uses `egui_extras::StripBuilder` for clean proportional column sizing.
+pub struct SidebarLayout {
+    sidebar_width: f32,
+}
+
+impl SidebarLayout {
+    /// Create a layout with a sidebar width in egui logical points.
+    pub fn new(sidebar_width: f32) -> Self {
+        Self { sidebar_width }
+    }
+
+    /// Show the two-column layout.
+    ///
+    /// The `sidebar` closure renders the left navigation.
+    /// The `content` closure renders the right content area.
+    pub fn show(self, ui: &mut Ui, sidebar: impl FnOnce(&mut Ui), content: impl FnOnce(&mut Ui)) {
+        StripBuilder::new(ui)
+            .size(Size::exact(self.sidebar_width))
+            .size(Size::remainder())
+            .horizontal(|mut strip| {
+                // Sidebar column
+                strip.cell(|ui| {
+                    sidebar(ui);
+                });
+
+                // Content column, inset from the sidebar and the top.
+                strip.cell(|ui| {
+                    let inset = ui.active_theme().spacing.xxl;
+                    let left = inset - ui.spacing().item_spacing.x;
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin {
+                            left: left as i8,
+                            top: inset as i8,
+                            ..Default::default()
+                        })
+                        .show(ui, content);
+                });
+            });
+    }
+}
+
+/// A sidebar tab item with icon, label, and selection state.
+///
+/// Used inside `SidebarLayout`'s sidebar column. Renders a full-width
+/// row with optional icon and label, with painted background for
+/// active/hover states.
+///
+/// # Example
+/// ```
+/// # use egui_charts::ui_kit::sidebar_layout::SidebarTab;
+/// # egui::__run_test_ui(|ui| {
+/// let tabs = ["General", "Appearance", "Trading"];
+/// let mut active = "General";
+/// for tab in tabs {
+///     if SidebarTab::new(tab, tab == active).show(ui) {
+///         active = tab;
+///     }
+/// }
+/// # });
+/// ```
+pub struct SidebarTab<'a> {
+    label: &'a str,
+    icon: Option<&'a crate::icons::Icon>,
+    is_active: bool,
+    fill: Option<Color32>,
+}
+
+impl<'a> SidebarTab<'a> {
+    /// Create a sidebar tab with a label and selection state.
+    pub fn new(label: &'a str, is_active: bool) -> Self {
+        Self {
+            label,
+            icon: None,
+            is_active,
+            fill: None,
+        }
+    }
+
+    /// Set the tab's optional icon.
+    pub fn icon(mut self, icon: &'a crate::icons::Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Set the fill of the selected tile, in place of the theme's neutral fill.
+    pub(crate) fn fill(mut self, fill: Color32) -> Self {
+        self.fill = Some(fill);
+        self
+    }
+
+    /// Show the sidebar tab. Returns `true` if clicked.
+    ///
+    /// The selected tab has a neutral fill and a semibold label in the text colour.
+    pub fn show(self, ui: &mut Ui) -> bool {
+        let theme = ui.active_theme();
+        let width = ui.available_width();
+        let height = DESIGN_TOKENS.sizing.button_xl;
+        // Rows touch, so the pitch is the tile height; the caller's spacing is kept for its other widgets.
+        let spacing = std::mem::take(&mut ui.spacing_mut().item_spacing.y);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+        ui.spacing_mut().item_spacing.y = spacing;
+        let translated_label = l10n::text(ui.ctx(), self.label);
+        response.widget_info(|| WidgetInfo::labeled(Role::Tab, ui.is_enabled(), &translated_label));
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_selected(self.is_active));
+
+        if self.is_active || response.hovered() {
+            ui.painter().rect_filled(
+                rect,
+                theme.radius.md,
+                if let Some(fill) = self.fill.filter(|_| self.is_active) {
+                    fill
+                } else if self.is_active && !theme.dark {
+                    theme.ui.text.gamma_multiply(0.06)
+                } else {
+                    ui.style().visuals.widgets.hovered.bg_fill
+                },
+            );
+        }
+
+        let text_color = ui.style().visuals.text_color();
+
+        // Every tab reserves the icon slot, so labels line up with or without an icon.
+        let icon_size = DESIGN_TOKENS.sizing.icon_md;
+        let icon_x = rect.min.x + theme.spacing.xxl + theme.spacing.sm;
+        if let Some(icon) = self.icon {
+            let icon_rect = Rect::from_min_size(
+                Pos2::new(icon_x, rect.center().y - icon_size / 2.0),
+                Vec2::splat(icon_size),
+            );
+            icon.as_image_tinted(icon_rect.size(), text_color)
+                .paint_at(ui, icon_rect);
+        }
+
+        // Label
+        let mut format =
+            egui::TextFormat::simple(egui::FontId::proportional(theme.text.title), text_color);
+        if self.is_active {
+            format.coords.push("wght", 600.0);
+        }
+        let label_x = icon_x + icon_size + theme.spacing.sm;
+        let mut job = egui::text::LayoutJob::single_section(translated_label, format);
+        job.wrap = egui::text::TextWrapping::truncate_at_width((rect.right() - label_x).max(0.0));
+        let galley = ui.painter().layout_job(job);
+        let label_pos = Pos2::new(label_x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(label_pos, galley, text_color);
+        crate::styles::focus::draw_focus_ring(ui, &response, theme.radius.md);
+
+        response.clicked()
+    }
+}

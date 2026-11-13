@@ -1,0 +1,17 @@
+[package]
+name = "tradecraft-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+vibestrader-credential = ["tradecraft-providers/vibestrader-credential"]
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+tradecraft-core.workspace = true
+tradecraft-providers.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,197 @@
+use crate::model::Bar;
+use crate::studies::palette;
+use crate::studies::stepper::update_window;
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Ultimate Momentum Oscillator
+/// Custom composite momentum indicator
+/// Combines multiple timeframes for confirmation
+#[derive(Clone)]
+pub struct UltimateMomentum {
+    /// Short period (typically 5)
+    short_period: usize,
+    /// Medium period (typically 10)
+    medium_period: usize,
+    /// Long period (typically 20)
+    long_period: usize,
+    values: IndicatorValues,
+    color: Color32,
+    visible: bool,
+}
+
+impl UltimateMomentum {
+    /// Create with `short`, `medium`, `long` in bars, each clamped to at least one.
+    pub fn new(short: usize, medium: usize, long: usize) -> Self {
+        Self {
+            short_period: short.max(1),
+            medium_period: medium.max(1),
+            long_period: long.max(1),
+            values: IndicatorValues::new(),
+            color: palette::PURPLE,
+            visible: true,
+        }
+    }
+
+    /// Set the plot color.
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = color;
+        self
+    }
+
+    fn calculate_roc(closes: &[f64], period: usize, index: usize) -> Option<f64> {
+        if index < period || closes[index - period] == 0.0 {
+            None
+        } else {
+            Some((closes[index] - closes[index - period]) / closes[index - period] * 100.0)
+        }
+    }
+}
+
+impl Default for UltimateMomentum {
+    fn default() -> Self {
+        Self::new(5, 10, 20)
+    }
+}
+
+impl UltimateMomentum {
+    fn compute(&self, data: &[Bar]) -> IndicatorValues {
+        let mut values = IndicatorValues::new();
+
+        if data.len() < self.long_period {
+            for _ in 0..data.len() {
+                values.push(IndicatorValue::None);
+            }
+            return values;
+        }
+
+        // Get closes
+        let closes: Vec<f64> = data.iter().map(|b| b.close).collect();
+
+        for i in 0..data.len() {
+            let roc_short = Self::calculate_roc(&closes, self.short_period, i);
+            let roc_medium = Self::calculate_roc(&closes, self.medium_period, i);
+            let roc_long = Self::calculate_roc(&closes, self.long_period, i);
+
+            match (roc_short, roc_medium, roc_long) {
+                (Some(s), Some(m), Some(l)) => {
+                    // Weighted combination: more weight to longer periods
+                    let momentum = (s * 1.0 + m * 2.0 + l * 3.0) / 6.0;
+                    values.push(IndicatorValue::Single(momentum));
+                }
+                _ => {
+                    values.push(IndicatorValue::None);
+                }
+            }
+        }
+        values
+    }
+}
+
+impl Indicator for UltimateMomentum {
+    fn source(&self) -> Option<crate::studies::StudySource> {
+        Some(crate::studies::StudySource::Price(
+            crate::model::PriceSource::Close,
+        ))
+    }
+
+    crate::studies::inputs::study_inputs!(self;
+        short_period: length("Short period", 1, usize::MAX),
+        medium_period: length("Medium period", 1, usize::MAX),
+        long_period: length("Long period", 1, usize::MAX)
+    ; {});
+
+    fn name(&self) -> &str {
+        "UltMom"
+    }
+
+    fn desc(&self) -> &str {
+        "Ultimate Momentum - Multi-timeframe momentum"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let mut values = std::mem::take(&mut self.values);
+        update_window(
+            &mut values,
+            data,
+            from,
+            |_data, from| {
+                from.saturating_sub(
+                    self.short_period
+                        .max(self.medium_period)
+                        .max(self.long_period),
+                )
+            },
+            |data| self.compute(data),
+        );
+        self.values = values;
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        vec![self.color]
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if !colors.is_empty() {
+            self.color = colors[0];
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        vec![format!(
+            "UltMom({},{},{})",
+            self.short_period, self.medium_period, self.long_period
+        )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studies::test_support::make_bar;
+
+    #[test]
+    fn test_ultimate_momentum() {
+        let mut um = UltimateMomentum::new(1, 2, 3);
+        let data: Vec<Bar> = [1.0, 2.0, 4.0, 8.0, 4.0]
+            .into_iter()
+            .map(make_bar)
+            .collect();
+        um.calculate(&data);
+        // Hand values for the custom 1:2:3 weighted ROC composite:
+        // bar 3: (100 + 2*300 + 3*700)/6 = 1400/3;
+        // bar 4: (-50 + 2*0 + 3*100)/6 = 125/3.
+        for (bar, want) in [(3, 1400.0 / 3.0), (4, 125.0 / 3.0)] {
+            let got = um.values().value(0, bar).unwrap();
+            assert_eq!(got, want, "bar {bar}");
+        }
+    }
+}
