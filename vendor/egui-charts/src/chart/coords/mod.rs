@@ -1,0 +1,395 @@
+//! Coordinate mapping between bar indices, prices and screen positions.
+//!
+//! Use [`ChartMapping`] to share the same mapping across rendering, hit testing
+//! and host overlays.
+
+use crate::scales::PriceMap;
+use egui::{Pos2, Rect};
+
+/// Unified coordinate mapping for charts and indicator panes.
+///
+/// Converts between:
+/// - Bar indices ↔ X screen coordinates
+/// - Prices ↔ Y screen coordinates
+///
+/// Share the mapping with overlays and hit tests to keep them aligned with the pane.
+#[derive(Clone, Debug)]
+pub struct ChartMapping {
+    /// Numeric row positions shared with the time scale; `None` keeps ordinal spacing.
+    pub numeric_positions: Option<crate::model::NumericPositions>,
+    /// The chart rectangle (rendering area)
+    pub rect: Rect,
+    /// Points per ordinal slot, or per initial mean numeric key gap.
+    pub bar_spacing: f32,
+    /// Index of the first visible bar
+    pub start_idx: usize,
+    /// Index of the final bar in the series, used as the horizontal anchor.
+    pub base_idx: usize,
+    /// Right-side offset for chart scrolling (in bar units)
+    pub right_offset: f64,
+    /// Price-to-y mapping of the pane; it carries its own vertical extent,
+    /// which need not match `rect`
+    pub price: PriceMap,
+}
+
+impl ChartMapping {
+    /// Automatic bar widths share the closest numeric key slots without changing coordinates.
+    pub(crate) fn bar_spacing_for_width(&self) -> f32 {
+        self.numeric_positions
+            .as_ref()
+            .map_or(self.bar_spacing, |positions| {
+                let right = self.base_idx as f64 + self.right_offset + 0.5;
+                let left = right - f64::from(self.rect.width()) / f64::from(self.bar_spacing);
+                self.bar_spacing * positions.min_gap(left, right) as f32
+            })
+    }
+
+    /// Create a new ChartMapping with all parameters.
+    pub fn new(
+        rect: Rect,
+        bar_spacing: f32,
+        start_idx: usize,
+        base_idx: usize,
+        right_offset: impl Into<f64>,
+        price: PriceMap,
+    ) -> Self {
+        Self {
+            numeric_positions: None,
+            rect,
+            bar_spacing,
+            start_idx,
+            base_idx,
+            right_offset: right_offset.into(),
+            price,
+        }
+    }
+
+    // =========================================================================
+    // X-axis conversions (bar index ↔ screen X)
+    // =========================================================================
+
+    /// Convert bar index to X screen coordinate.
+    ///
+    /// This is the canonical formula used everywhere.
+    #[inline]
+    pub fn idx_to_x(&self, bar_idx: usize) -> f32 {
+        self.index_to_x(bar_idx as f64)
+    }
+
+    /// Convert a fractional row index to X, including numeric sample positions.
+    pub fn index_to_x(&self, index: f64) -> f32 {
+        let position = self
+            .numeric_positions
+            .as_ref()
+            .map_or(index, |positions| positions.position(index));
+        let delta_from_right = (self.base_idx as f64 - position) + self.right_offset;
+        (f64::from(self.rect.min.x) + f64::from(self.rect.width())
+            - (delta_from_right + 0.5) * f64::from(self.bar_spacing)
+            - 1.0) as f32
+    }
+
+    /// Convert X screen coordinate to bar index (inverse of idx_to_x).
+    ///
+    /// A degenerate `bar_spacing` (zero or sub-epsilon) has no inverse, so the
+    /// anchor index is returned rather than producing an infinite/NaN index.
+    #[inline]
+    pub fn x_to_idx(&self, x: f32) -> usize {
+        if self.bar_spacing.abs() < f32::EPSILON {
+            return self.base_idx;
+        }
+        self.x_to_idx_f64(x).round() as usize
+    }
+
+    /// Convert X screen coordinate to fractional bar index.
+    ///
+    /// Useful for precise positioning (e.g., crosshair snapping).
+    ///
+    /// A degenerate `bar_spacing` (zero or sub-epsilon) has no inverse, so the
+    /// anchor index is returned rather than producing an infinite/NaN index.
+    #[inline]
+    pub fn x_to_idx_f32(&self, x: f32) -> f32 {
+        self.x_to_idx_f64(x) as f32
+    }
+
+    /// Convert X to a fractional bar index, retaining sub-bar precision on large histories.
+    /// A degenerate spacing returns the anchor, as in [`Self::x_to_idx_f32`].
+    #[inline]
+    pub fn x_to_idx_f64(&self, x: f32) -> f64 {
+        if self.bar_spacing.abs() < f32::EPSILON {
+            return self.base_idx as f64 + self.right_offset;
+        }
+        let relative_x = f64::from(x) - f64::from(self.rect.min.x);
+        let delta_from_right =
+            (f64::from(self.rect.width()) - relative_x - 1.0) / f64::from(self.bar_spacing) - 0.5;
+        let position = self.base_idx as f64 + (self.right_offset - delta_from_right);
+        self.numeric_positions
+            .as_ref()
+            .map_or(position, |positions| positions.index(position))
+    }
+
+    /// Check if an X coordinate is within the visible chart bounds.
+    #[inline]
+    pub fn is_x_visible(&self, x: f32) -> bool {
+        x >= self.rect.min.x && x <= self.rect.max.x
+    }
+
+    /// Resolve the bar directly under a cursor X coordinate to a local index
+    /// into the visible data slice of length `visible_len`.
+    ///
+    /// Returns `None` when there is no data, or when the cursor falls before the
+    /// first bar or after the last bar (the right-side empty scroll margin), so
+    /// callers never index past the slice or read a stale neighbour. Resolution
+    /// uses [`Self::x_to_idx_f64`], the exact inverse of [`Self::idx_to_x`], so
+    /// the bar at its own centre x resolves to itself and the readout describes
+    /// the same bar the crosshair snaps to.
+    #[inline]
+    pub fn local_idx_at_x(&self, x: f32, visible_len: usize) -> Option<usize> {
+        if visible_len == 0 || self.bar_spacing.abs() < f32::EPSILON {
+            return None;
+        }
+        let global_idx = self.x_to_idx_f64(x).round() as isize;
+
+        let first = self.start_idx as isize;
+        let last = (self.start_idx + visible_len - 1) as isize;
+        if global_idx < first || global_idx > last {
+            return None;
+        }
+        Some((global_idx as usize) - self.start_idx)
+    }
+
+    /// Calculate the bar width based on spacing, capped by the closest numeric keys in view.
+    #[inline]
+    pub fn bar_width(&self) -> f32 {
+        (self.bar_spacing_for_width() * 0.6).max(1.0)
+    }
+
+    // =========================================================================
+    // Y-axis conversions (price ↔ screen Y)
+    // =========================================================================
+
+    /// Convert price to Y screen coordinate.
+    #[inline]
+    pub fn price_to_y(&self, price: f64) -> f32 {
+        self.price.price_to_y(price)
+    }
+
+    /// Convert Y screen coordinate to price (inverse of price_to_y).
+    #[inline]
+    pub fn y_to_price(&self, y: f32) -> f64 {
+        self.price.y_to_price(y)
+    }
+
+    /// Check if a Y coordinate is within the visible chart bounds.
+    #[inline]
+    pub fn is_y_visible(&self, y: f32) -> bool {
+        y >= self.rect.min.y && y <= self.rect.max.y
+    }
+
+    // =========================================================================
+    // Combined conversions
+    // =========================================================================
+
+    /// Convert bar index and price to screen position.
+    #[inline]
+    pub fn to_screen(&self, bar_idx: usize, price: f64) -> Pos2 {
+        Pos2::new(self.idx_to_x(bar_idx), self.price_to_y(price))
+    }
+
+    /// Convert screen position to bar index and price.
+    #[inline]
+    pub fn from_screen(&self, pos: Pos2) -> (usize, f64) {
+        (self.x_to_idx(pos.x), self.y_to_price(pos.y))
+    }
+
+    /// Check if a screen position is within the visible chart bounds.
+    #[inline]
+    pub fn is_visible(&self, pos: Pos2) -> bool {
+        self.rect.contains(pos)
+    }
+
+    // =========================================================================
+    // Utility methods
+    // =========================================================================
+
+    /// Create a new ChartMapping with a different rect (for sub-regions).
+    ///
+    /// Only the x mapping and the bounds checks follow the new rect: `price`
+    /// still maps onto its own pane.
+    pub fn with_rect(&self, rect: Rect) -> Self {
+        Self {
+            rect,
+            ..self.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scales::{PriceRange, PriceTransform};
+
+    /// A mapping with a linear price axis over `min..max`.
+    fn mapping(
+        rect: Rect,
+        bar_spacing: f32,
+        start_idx: usize,
+        base_idx: usize,
+        right_offset: f32,
+        min: f64,
+        max: f64,
+    ) -> ChartMapping {
+        let range = PriceRange::new(min, max);
+        let price = PriceMap::new(
+            PriceTransform::default(),
+            range,
+            rect.min.y,
+            rect.max.y,
+            false,
+        );
+        ChartMapping::new(rect, bar_spacing, start_idx, base_idx, right_offset, price)
+    }
+
+    #[test]
+    fn test_idx_to_x_roundtrip() {
+        let mapping = mapping(
+            Rect::from_min_size(Pos2::new(100.0, 50.0), egui::Vec2::new(800.0, 400.0)),
+            10.0, // bar_spacing
+            50,   // start_idx
+            100,  // base_idx
+            5.0,  // right_offset
+            100.0,
+            200.0,
+        );
+
+        // x = 100 + 800 - (100 + 5 - 75 + 0.5) * 10 - 1 = 594.
+        assert_eq!(mapping.idx_to_x(75), 594.0);
+        assert_eq!(mapping.x_to_idx(594.0), 75);
+        // Test roundtrip for several indices
+        for idx in [50, 75, 100, 105] {
+            let x = mapping.idx_to_x(idx);
+            let recovered = mapping.x_to_idx(x);
+            assert_eq!(recovered, idx, "idx {idx} -> x {x} -> idx {recovered}");
+        }
+        for (right_offset, index) in [(-0.005, 999_999), (-500_000.005, 499_999)] {
+            let large = ChartMapping {
+                base_idx: 999_999,
+                bar_spacing: 200.0,
+                right_offset,
+                ..mapping.clone()
+            };
+            assert_eq!(large.idx_to_x(index), 800.0);
+            assert_eq!(large.x_to_idx(800.0), index);
+            assert_eq!(large.x_to_idx(901.0), index + 1);
+        }
+    }
+
+    #[test]
+    fn test_price_to_y_finite_on_flat_range() {
+        // A flat price window must map to a finite, in-rect y rather than
+        // dividing by zero and producing an off-screen NaN/inf.
+        let mapping = mapping(
+            Rect::from_min_size(Pos2::new(100.0, 50.0), egui::Vec2::new(800.0, 400.0)),
+            10.0,
+            50,
+            100,
+            5.0,
+            150.0,
+            150.0, // price_min == price_max
+        );
+        let y = mapping.price_to_y(150.0);
+        assert!(y.is_finite());
+        assert!((mapping.rect.min.y..=mapping.rect.max.y).contains(&y));
+    }
+
+    #[test]
+    fn test_inverse_transforms_on_degenerate_inputs() {
+        // Zero bar spacing and zero rect height have no inverse; the guards
+        // return finite, sensible fallbacks instead of NaN/inf.
+        let degenerate = mapping(
+            Rect::from_min_size(Pos2::new(0.0, 0.0), egui::Vec2::new(0.0, 0.0)),
+            0.0, // bar_spacing
+            0,
+            0,
+            0.0,
+            100.0,
+            200.0,
+        );
+        // No panic, finite results.
+        let _ = degenerate.x_to_idx(10.0);
+        let idx_f = degenerate.x_to_idx_f32(10.0);
+        assert!(idx_f.is_finite());
+        let price = degenerate.y_to_price(10.0);
+        assert!(price.is_finite());
+        assert_eq!(price, 100.0);
+    }
+
+    #[test]
+    fn test_local_idx_at_x_edges_and_empty() {
+        let mapping = mapping(
+            Rect::from_min_size(Pos2::new(100.0, 50.0), egui::Vec2::new(800.0, 400.0)),
+            10.0,
+            50,
+            55,
+            0.0,
+            100.0,
+            200.0,
+        );
+        let visible_len = 6;
+
+        // Empty data never resolves a bar.
+        assert_eq!(mapping.local_idx_at_x(400.0, 0), None);
+
+        // Far to the right of the last bar (empty scroll margin) -> None.
+        assert_eq!(
+            mapping.local_idx_at_x(mapping.rect.max.x + 50.0, visible_len),
+            None
+        );
+
+        // Far to the left of the first bar -> None.
+        assert_eq!(
+            mapping.local_idx_at_x(mapping.rect.min.x - 50.0, visible_len),
+            None
+        );
+
+        for local in 0..visible_len {
+            let x = mapping.idx_to_x(mapping.start_idx + local);
+            assert_eq!(
+                mapping.local_idx_at_x(x, visible_len),
+                Some(local),
+                "local {local}"
+            );
+        }
+        // Zero spacing has no inverse.
+        let degenerate = ChartMapping {
+            bar_spacing: 0.0,
+            ..mapping
+        };
+        assert_eq!(degenerate.local_idx_at_x(400.0, visible_len), None);
+    }
+
+    #[test]
+    fn test_price_to_y_roundtrip() {
+        let mapping = mapping(
+            Rect::from_min_size(Pos2::new(100.0, 50.0), egui::Vec2::new(800.0, 400.0)),
+            10.0,
+            50,  // start_idx
+            100, // base_idx
+            5.0,
+            100.0,
+            200.0,
+        );
+
+        // 175 is three quarters of the way up a 400-point axis: 450 - 300 = 150.
+        assert_eq!(mapping.price_to_y(175.0), 150.0);
+        assert_eq!(mapping.y_to_price(150.0), 175.0);
+        // Test roundtrip for several prices
+        for price in [100.0, 125.0, 150.0, 175.0, 200.0] {
+            let y = mapping.price_to_y(price);
+            let recovered = mapping.y_to_price(y);
+            assert!(
+                (recovered - price).abs() < 0.001,
+                "price {price} -> y {y} -> price {recovered}"
+            );
+        }
+    }
+}

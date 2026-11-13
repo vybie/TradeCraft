@@ -1,0 +1,215 @@
+use crate::model::Bar;
+use crate::studies::palette;
+use crate::studies::stepper::update_window;
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Center of Gravity Oscillator
+/// Developed by John Ehlers
+/// Uses a weighted moving avg to identify reversal points
+#[derive(Clone)]
+pub struct CenterOfGravity {
+    /// Lookback period (typically 10)
+    period: usize,
+    values: IndicatorValues,
+    /// Colors: [COG, Signal]
+    colors: Vec<Color32>,
+    visible: bool,
+}
+
+impl CenterOfGravity {
+    /// Create with a lookback of `period` bars, clamped to at least 1.
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+            values: IndicatorValues::new(),
+            colors: vec![
+                palette::UP,     // Teal - COG
+                palette::ORANGE, // Signal
+            ],
+            visible: true,
+        }
+    }
+
+    /// Set plot colors in the order returned by [`Indicator::line_names`].
+    pub fn with_colors(mut self, colors: Vec<Color32>) -> Self {
+        self.colors = colors;
+        self
+    }
+}
+
+impl Default for CenterOfGravity {
+    fn default() -> Self {
+        Self::new(10)
+    }
+}
+
+impl CenterOfGravity {
+    fn compute(&self, data: &[Bar]) -> IndicatorValues {
+        let mut values = IndicatorValues::new();
+
+        if data.len() < self.period {
+            for _ in 0..data.len() {
+                values.push(IndicatorValue::None);
+            }
+            return values;
+        }
+
+        // Get closes
+        let closes: Vec<f64> = data.iter().map(|b| b.close).collect();
+
+        let mut cog_values = Vec::with_capacity(data.len());
+        let mut prev_cog = 0.0;
+
+        for i in 0..data.len() {
+            if i < self.period - 1 {
+                cog_values.push((f64::NAN, f64::NAN));
+                continue;
+            }
+
+            let window = &closes[i + 1 - self.period..=i];
+
+            // Calculate numerator: sum of (price * (period - j + 1))
+            let mut num = 0.0;
+            let mut den = 0.0;
+
+            for (j, &price) in window.iter().enumerate() {
+                let weight = (self.period - j) as f64;
+                num += weight * price;
+                den += price;
+            }
+
+            let cog = if den != 0.0 { -num / den } else { 0.0 };
+            // The first value has no previous one to signal on.
+            let signal = if i + 1 == self.period {
+                f64::NAN
+            } else {
+                prev_cog
+            };
+
+            prev_cog = cog;
+            cog_values.push((cog, signal));
+        }
+
+        // Store results
+        for (cog, signal) in &cog_values {
+            if cog.is_nan() {
+                values.push(IndicatorValue::None);
+            } else {
+                values.push_lines(&[*cog, *signal]);
+            }
+        }
+        values
+    }
+}
+
+impl Indicator for CenterOfGravity {
+    fn source(&self) -> Option<crate::studies::StudySource> {
+        Some(crate::studies::StudySource::Price(
+            crate::model::PriceSource::Close,
+        ))
+    }
+
+    crate::studies::inputs::study_inputs!(self;
+        period: length("Period", 1, usize::MAX)
+    ; {});
+
+    fn name(&self) -> &str {
+        "COG"
+    }
+
+    fn desc(&self) -> &str {
+        "Center of Gravity - Identifies price reversal points"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let mut values = std::mem::take(&mut self.values);
+        update_window(
+            &mut values,
+            data,
+            from,
+            |_data, from| from.saturating_sub(self.period),
+            |data| self.compute(data),
+        );
+        self.values = values;
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        self.colors.clone()
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if colors.len() >= 2 {
+            self.colors = colors;
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        vec![format!("COG({})", self.period), "Signal".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studies::test_support::make_bar;
+
+    #[test]
+    fn test_cog_calculation() {
+        let mut cog = CenterOfGravity::new(5);
+
+        let data = vec![
+            make_bar(100.0),
+            make_bar(102.0),
+            make_bar(104.0),
+            make_bar(103.0),
+            make_bar(105.0),
+            make_bar(107.0),
+            make_bar(106.0),
+        ];
+
+        cog.calculate(&data);
+
+        assert_eq!(cog.values.len(), 7);
+
+        // Ehlers' negative weighted-price ratio, oldest weights 5,4,3,2,1:
+        // -(500+408+312+206+105)/514, then -1552/521 and -1567/525.
+        for (bar, want, signal) in [
+            (4, -1531.0 / 514.0, None),
+            (5, -1552.0 / 521.0, Some(-1531.0 / 514.0)),
+            (6, -1567.0 / 525.0, Some(-1552.0 / 521.0)),
+        ] {
+            let got = cog.values().value(0, bar).unwrap();
+            assert_eq!(got, want, "bar {bar}");
+            assert_eq!(cog.values().value(1, bar), signal, "signal bar {bar}");
+        }
+    }
+}

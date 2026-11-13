@@ -1,0 +1,49 @@
+//! Loading indicator component: a spinner with an optional message.
+//!
+//! ```
+//! # use egui_charts::ui_kit::LoadingIndicator;
+//! # egui::__run_test_ui(|ui| {
+//! LoadingIndicator::new().message("Loading templates...").show(ui);
+//! # });
+//! ```
+
+use crate::localization as l10n;
+use egui::{RichText, Ui};
+
+/// A loading spinner with optional message text.
+///
+/// Renders a horizontal layout with spinner + label, vertically padded.
+pub struct LoadingIndicator<'a> {
+    message: Option<&'a str>,
+}
+
+impl<'a> LoadingIndicator<'a> {
+    /// Create a spinner without a message.
+    pub fn new() -> Self {
+        Self { message: None }
+    }
+
+    /// Set the loading message (default: "Loading...").
+    #[must_use]
+    pub fn message(mut self, msg: &'a str) -> Self {
+        self.message = Some(msg);
+        self
+    }
+
+    /// Show the loading indicator.
+    pub fn show(self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new(l10n::text(ui.ctx(), self.message.unwrap_or("Loading...")))
+                    .color(ui.visuals().weak_text_color()),
+            );
+        });
+    }
+}
+
+impl Default for LoadingIndicator<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

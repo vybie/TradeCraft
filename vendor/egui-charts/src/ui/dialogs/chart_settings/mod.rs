@@ -1,0 +1,1733 @@
+//! Tabbed dialog for editing chart display settings.
+//!
+//! Open [`SettingsDialog`] with the chart's settings and apply the returned
+//! [`SettingsAction`] in the host.
+
+use crate::localization as l10n;
+use crate::theme::ThemeExt;
+use crate::widget::settings::ChartSettingsState;
+mod tabs;
+
+use crate::icons::icons as embedded_icons;
+use crate::services::StoreKind;
+use crate::theme::Theme;
+use crate::tokens::DESIGN_TOKENS;
+use crate::ui::Control;
+use crate::ui::dialogs::templates::TemplateStore;
+use crate::ui::top_toolbar::components::settings_menu::{
+    actions::SettingsAction, config::SettingsDialogConfig, types::SettingsTab,
+};
+use crate::ui_kit::ColorPickerState;
+use crate::ui_kit::dialog::DialogFooter;
+use crate::ui_kit::modal::Modal;
+use crate::ui_kit::sidebar_layout::{SidebarLayout, SidebarTab};
+use egui::{Color32, Context, Rect, Response, RichText, Ui, Vec2};
+use std::collections::HashSet;
+
+// ============================================================================
+// Settings Dialog (Modal)
+// ============================================================================
+
+/// Width of the tab sidebar, before it yields to narrow windows.
+const SIDEBAR_WIDTH: f32 = 206.0;
+
+/// Outer height of the tallest tab, whose centred top edge every tab keeps.
+const TALLEST_TAB_HEIGHT: f32 = 840.0;
+
+/// Modal settings dialog with tabbed interface.
+///
+/// Edits chart display settings, event category visibility and the host trading and
+/// alert-overlay preferences.
+pub struct SettingsDialog {
+    /// Whether the dialog is currently open
+    pub is_open: bool,
+    active_tab: SettingsTab,
+    settings: ChartSettingsState,
+    /// Current template name (empty if using default/unsaved settings)
+    template_name: String,
+    /// Whether the template dropdown menu is open
+    template_menu_open: bool,
+    /// Host-readable chart templates and their optional storage connection.
+    pub templates: TemplateStore<ChartSettingsState>,
+    save_name: Option<String>,
+    timezones: Vec<String>,
+    /// Dialog styling configuration (width, height overrides)
+    config: SettingsDialogConfig,
+    color_picker_states: ColorPickerStates,
+    margin_top_str: String,
+    margin_bottom_str: String,
+    margin_right_str: String,
+    /// Controls the host hid.
+    hidden: HashSet<Control>,
+    apply_to_all: bool,
+    /// The local sounds the host can play, by name, offered on the Trading and Alerts tabs. The host
+    /// plays the chosen one; see
+    /// [`Trading::take_execution_sound`](crate::ui::trading::Trading::take_execution_sound).
+    /// Without any, the tab offers no choice.
+    pub execution_sounds: Vec<String>,
+    sound_preview: Option<(String, f32)>,
+    /// Heatmap, book, individual orders and bubbles offered by the host.
+    order_flow_layers: [bool; 4],
+}
+
+#[derive(Clone, Default)]
+struct ColorPickerStates {
+    body_up: ColorPickerState,
+    body_down: ColorPickerState,
+    border_up: ColorPickerState,
+    border_down: ColorPickerState,
+    wick_up: ColorPickerState,
+    wick_down: ColorPickerState,
+    background: ColorPickerState,
+    background_gradient_top: ColorPickerState,
+    background_gradient_bottom: ColorPickerState,
+    grid_h: ColorPickerState,
+    grid_v: ColorPickerState,
+    crosshair: ColorPickerState,
+    watermark: ColorPickerState,
+    scales_text: ColorPickerState,
+    scales_lines: ColorPickerState,
+    alert: ColorPickerState,
+    symbol_value: ColorPickerState,
+    study_value: ColorPickerState,
+    extended_value: ColorPickerState,
+}
+
+impl Default for SettingsDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SettingsDialog {
+    /// Create a [`SettingsDialog`] with default settings.
+    pub fn new() -> Self {
+        let settings = ChartSettingsState::default();
+        let timezones: &[&str] = if cfg!(feature = "timezones") {
+            &[
+                "UTC",
+                "America/New_York",
+                "America/Chicago",
+                "America/Los_Angeles",
+                "Europe/London",
+                "Europe/Paris",
+                "Asia/Tokyo",
+                "Asia/Hong_Kong",
+                "Asia/Singapore",
+                "Australia/Sydney",
+            ]
+        } else {
+            &[
+                "UTC", "-08:00", "-06:00", "-05:00", "+01:00", "+08:00", "+09:00", "+10:00",
+            ]
+        };
+        Self {
+            is_open: false,
+            active_tab: SettingsTab::Symbol,
+            color_picker_states: ColorPickerStates {
+                body_up: ColorPickerState::new(settings.candle_colors.body_up),
+                body_down: ColorPickerState::new(settings.candle_colors.body_down),
+                border_up: ColorPickerState::new(settings.candle_colors.border_up),
+                border_down: ColorPickerState::new(settings.candle_colors.border_down),
+                wick_up: ColorPickerState::new(settings.candle_colors.wick_up),
+                wick_down: ColorPickerState::new(settings.candle_colors.wick_down),
+                background: ColorPickerState::new(settings.chart_basic_styles.background_color),
+                background_gradient_top: ColorPickerState::new(
+                    settings.chart_basic_styles.background_gradient_top,
+                ),
+                background_gradient_bottom: ColorPickerState::new(
+                    settings.chart_basic_styles.background_gradient_bottom,
+                ),
+                grid_h: ColorPickerState::new(settings.grid_lines.horizontal_color),
+                grid_v: ColorPickerState::new(settings.grid_lines.vertical_color),
+                crosshair: ColorPickerState::new(settings.crosshair.color),
+                watermark: ColorPickerState::new(settings.watermark.color),
+                scales_text: ColorPickerState::new(settings.scales_appearance.text_color),
+                scales_lines: ColorPickerState::new(settings.scales_appearance.lines_color),
+                alert: ColorPickerState::new(settings.alerts.alert_color),
+                symbol_value: ColorPickerState::new(
+                    settings
+                        .scales_and_lines
+                        .symbol_price_color
+                        .unwrap_or(settings.candle_colors.body_up),
+                ),
+                study_value: ColorPickerState::new(
+                    settings
+                        .scales_and_lines
+                        .study_value_color
+                        .unwrap_or(settings.scales_appearance.text_color),
+                ),
+                extended_value: ColorPickerState::new(
+                    settings.scales_and_lines.extended_session_price_color,
+                ),
+            },
+            margin_top_str: format!("{}", settings.margins.top_percent),
+            margin_bottom_str: format!("{}", settings.margins.bottom_percent),
+            margin_right_str: format!("{}", settings.margins.right_bars),
+            settings,
+            template_name: String::new(),
+            template_menu_open: false,
+            templates: TemplateStore::new(StoreKind::ChartTemplates),
+            save_name: None,
+            timezones: timezones.iter().map(|zone| (*zone).to_owned()).collect(),
+            config: SettingsDialogConfig::default(),
+            hidden: HashSet::new(),
+            apply_to_all: false,
+            execution_sounds: Vec::new(),
+            sound_preview: None,
+            order_flow_layers: [true; 4],
+        }
+    }
+
+    /// Offers a button that applies the dialog's settings to all charts of the layout and closes
+    /// the dialog, for a host showing several charts. It returns as
+    /// [`SettingsAction::ApplyToAll`]. Off by default.
+    pub fn offer_apply_to_all(&mut self, offered: bool) {
+        self.apply_to_all = offered;
+    }
+
+    /// Shows or hides `control`: Templates (the template button and menu; Reset to defaults
+    /// then takes the button's place). The dialog ignores the other controls.
+    pub fn set_control_visible(&mut self, control: Control, visible: bool) {
+        crate::ui::app_state::set_control_visible(&mut self.hidden, control, visible);
+        if control == Control::Templates && !visible {
+            self.template_menu_open = false;
+        }
+    }
+
+    /// Restrict Order flow controls to services explicitly declared for the chart's instrument.
+    /// Pass [`Chart::feed_capabilities`](crate::Chart::feed_capabilities) and
+    /// [`Chart::instrument`](crate::Chart::instrument) again when they change. A missing instrument
+    /// or a non-positive, non-finite or missing tick size hides the tab. Before the first call,
+    /// all layers are offered. Hidden controls retain their saved values.
+    pub fn set_feed_capabilities(
+        &mut self,
+        capabilities: Option<&crate::data::FeedCapabilities>,
+        instrument: Option<&crate::model::Instrument>,
+    ) {
+        use crate::model::FeedService;
+        let declares = |service| {
+            instrument.is_some_and(|instrument| {
+                instrument
+                    .tick_size
+                    .is_some_and(|tick| tick.is_finite() && tick > 0.0)
+                    && capabilities
+                        .unwrap_or(&crate::data::FeedCapabilities::default())
+                        .declares(service, instrument)
+            })
+        };
+        let depth = declares(FeedService::Depth);
+        self.order_flow_layers = [
+            depth || declares(FeedService::DepthHistory),
+            depth,
+            depth && declares(FeedService::OrderDepth),
+            declares(FeedService::Trades) || declares(FeedService::LiveTrades),
+        ];
+        if !self.order_flow_layers.iter().any(|available| *available)
+            && self.active_tab == SettingsTab::OrderFlow
+        {
+            self.active_tab = SettingsTab::Symbol;
+        }
+    }
+
+    /// Open the dialog with the supplied state.
+    pub fn open(&mut self, settings: ChartSettingsState) {
+        self.is_open = true;
+        self.template_menu_open = false;
+        self.save_name = None;
+        self.sound_preview = None;
+        self.settings = settings;
+        self.active_tab = SettingsTab::Symbol;
+        self.update_color_pickers_from_settings();
+    }
+
+    /// Sync all color picker states from the current settings
+    fn update_color_pickers_from_settings(&mut self) {
+        self.color_picker_states.body_up.sel_color = self.settings.candle_colors.body_up;
+        self.color_picker_states.body_down.sel_color = self.settings.candle_colors.body_down;
+        self.color_picker_states.border_up.sel_color = self.settings.candle_colors.border_up;
+        self.color_picker_states.border_down.sel_color = self.settings.candle_colors.border_down;
+        self.color_picker_states.wick_up.sel_color = self.settings.candle_colors.wick_up;
+        self.color_picker_states.wick_down.sel_color = self.settings.candle_colors.wick_down;
+        self.color_picker_states.background.sel_color =
+            self.settings.chart_basic_styles.background_color;
+        self.color_picker_states.background_gradient_top.sel_color =
+            self.settings.chart_basic_styles.background_gradient_top;
+        self.color_picker_states
+            .background_gradient_bottom
+            .sel_color = self.settings.chart_basic_styles.background_gradient_bottom;
+        self.color_picker_states.grid_h.sel_color = self.settings.grid_lines.horizontal_color;
+        self.color_picker_states.grid_v.sel_color = self.settings.grid_lines.vertical_color;
+        self.color_picker_states.crosshair.sel_color = self.settings.crosshair.color;
+        self.color_picker_states.watermark.sel_color = self.settings.watermark.color;
+        self.color_picker_states.scales_text.sel_color = self.settings.scales_appearance.text_color;
+        self.color_picker_states.scales_lines.sel_color =
+            self.settings.scales_appearance.lines_color;
+
+        self.color_picker_states.alert.sel_color = self.settings.alerts.alert_color;
+        self.color_picker_states.symbol_value.sel_color = self
+            .settings
+            .scales_and_lines
+            .symbol_price_color
+            .unwrap_or(self.settings.candle_colors.body_up);
+        self.color_picker_states.study_value.sel_color = self
+            .settings
+            .scales_and_lines
+            .study_value_color
+            .unwrap_or(self.settings.scales_appearance.text_color);
+        self.color_picker_states.extended_value.sel_color =
+            self.settings.scales_and_lines.extended_session_price_color;
+
+        self.margin_top_str = format!("{}", self.settings.margins.top_percent);
+        self.margin_bottom_str = format!("{}", self.settings.margins.bottom_percent);
+        self.margin_right_str = format!("{}", self.settings.margins.right_bars);
+    }
+
+    /// Close the dialog.
+    pub fn close(&mut self) {
+        self.is_open = false;
+    }
+
+    /// Read the display settings being edited.
+    pub fn settings(&self) -> &ChartSettingsState {
+        &self.settings
+    }
+
+    /// Show the dialog and return the requested action.
+    pub fn show(&mut self, ctx: &Context, theme: &Theme) -> SettingsAction {
+        self.templates.poll(ctx);
+        let mut action = SettingsAction::None;
+
+        if !self.is_open {
+            return action;
+        }
+
+        let basic = &self.settings.chart_basic_styles;
+        for (picker, color, themed) in [
+            (
+                &mut self.color_picker_states.background,
+                basic.background_color,
+                theme.chart.bg,
+            ),
+            (
+                &mut self.color_picker_states.background_gradient_top,
+                basic.background_gradient_top,
+                theme.chart.bg,
+            ),
+            (
+                &mut self.color_picker_states.background_gradient_bottom,
+                basic.background_gradient_bottom,
+                theme.chart.bg_axis,
+            ),
+        ] {
+            picker.sel_color = if color == Color32::PLACEHOLDER {
+                themed
+            } else {
+                color
+            };
+        }
+
+        let mut is_open = self.is_open;
+        let fixed_height = (self.config.height > 0.0).then_some(self.config.height);
+        let height = fixed_height.unwrap_or(match self.active_tab {
+            SettingsTab::Symbol => 616.0,
+            SettingsTab::Alerts | SettingsTab::Events => 500.0,
+            _ => TALLEST_TAB_HEIGHT,
+        });
+        let width = if self.config.width > 0.0 {
+            self.config.width
+        } else {
+            752.0
+        };
+        let screen = ctx.content_rect();
+        // The tallest tab sits centred in the window; shorter tabs keep its top edge.
+        let tallest_height = fixed_height.unwrap_or(TALLEST_TAB_HEIGHT);
+        let tallest_height =
+            tallest_height.min((screen.height() - 2.0 * ctx.active_theme().spacing.xxxl).max(0.0));
+        Modal::new("chart_settings", "Chart settings")
+            .width(width)
+            .height(height)
+            .top(screen.center().y - tallest_height / 2.0)
+            .dim_background(false)
+            .show(ctx, &mut is_open, |ui| {
+                ui.add_space(theme.spacing.xxxl);
+                action = self.draw_content(ui, theme);
+            });
+
+        // Only update is_open from egui's Window if btns didn't already close it
+        // (btns set self.is_open = false directly)
+        if self.is_open && !is_open {
+            // Window was closed via egui's mechanism (outside click, etc)
+            self.is_open = false;
+            action = SettingsAction::Cancel;
+        }
+
+        if let SettingsAction::Apply(settings) = &mut action {
+            let basic = &mut settings.chart_basic_styles;
+            for (color, themed) in [
+                (&mut basic.background_color, theme.chart.bg),
+                (&mut basic.background_gradient_top, theme.chart.bg),
+                (&mut basic.background_gradient_bottom, theme.chart.bg_axis),
+            ] {
+                if *color == Color32::PLACEHOLDER {
+                    *color = themed;
+                }
+            }
+        }
+
+        if let Some((name, volume)) = self.sound_preview.take() {
+            return SettingsAction::PreviewSound { name, volume };
+        }
+        action
+    }
+
+    fn draw_content(&mut self, ui: &mut Ui, theme: &Theme) -> SettingsAction {
+        let mut action = SettingsAction::None;
+
+        let content_height = (ui.available_height() - 68.0).max(0.0);
+
+        let sidebar_width = SIDEBAR_WIDTH.min(ui.available_width() * 0.4);
+        let mut active = self.active_tab;
+        let order_flow_available = self.order_flow_layers.iter().any(|available| *available);
+        ui.allocate_ui(Vec2::new(ui.available_width(), content_height), |ui| {
+            SidebarLayout::new(sidebar_width).show(
+                ui,
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("settings_tabs")
+                        .show(ui, |ui| {
+                            for tab in SettingsTab::all() {
+                                if *tab == SettingsTab::OrderFlow && !order_flow_available {
+                                    continue;
+                                }
+                                if SidebarTab::new(tab.name(), active == *tab)
+                                    .icon(tab.icon())
+                                    .show(ui)
+                                {
+                                    active = *tab;
+                                }
+                            }
+                        });
+                },
+                |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("settings_content")
+                        .auto_shrink([false, false])
+                        .max_height(ui.available_height())
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::splat(theme.spacing.lg);
+                            match self.active_tab {
+                                SettingsTab::Symbol => self.draw_symbol_tab(ui, theme),
+                                SettingsTab::OrderFlow => self.draw_order_flow_tab(ui, theme),
+                                SettingsTab::StatusLine => self.draw_status_line_tab(ui, theme),
+                                SettingsTab::ScalesAndLines => {
+                                    self.draw_scales_and_lines_tab(ui, theme)
+                                }
+                                SettingsTab::Canvas => self.draw_canvas_tab(ui, theme),
+                                SettingsTab::Trading => self.draw_trading_tab(ui, theme),
+                                SettingsTab::Alerts => self.draw_alerts_tab(ui, theme),
+                                SettingsTab::Events => self.draw_events_tab(ui, theme),
+                            }
+                        });
+                },
+            );
+        });
+        self.active_tab = active;
+
+        let error = self
+            .settings
+            .validate()
+            .err()
+            .map(|error| error.to_string())
+            .or_else(|| {
+                (self.margin_top_str.parse::<f32>().is_err()
+                    || self.margin_bottom_str.parse::<f32>().is_err()
+                    || self.margin_right_str.parse::<u32>().is_err())
+                .then(|| "Enter valid margins".to_owned())
+            });
+        let (ok, cancel) = DialogFooter::new("Ok")
+            .secondary("Cancel")
+            .primary_enabled(error.is_none())
+            .show_with_left(ui, |ui| {
+                if let Some(error) = &error {
+                    crate::ui_kit::status_message::status_message(
+                        ui,
+                        crate::ui_kit::status_message::MessageKind::Error,
+                        error,
+                    );
+                } else if self.hidden.contains(&Control::Templates) {
+                    self.draw_reset_button(ui);
+                } else {
+                    let button = self.draw_template_button(ui, theme);
+                    if button.clicked() {
+                        self.template_menu_open = !self.template_menu_open;
+                    }
+                    if self.template_menu_open {
+                        action = self.draw_template_menu(ui, theme, &button, action.clone());
+                    }
+                }
+                if error.is_none()
+                    && self.apply_to_all
+                    && ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(l10n::text(ui.ctx(), "Apply to all"))
+                                    .size(theme.text.title)
+                                    .color(theme.ui.text),
+                            )
+                            .fill(theme.ui.panel_bg)
+                            .stroke(egui::Stroke::new(
+                                DESIGN_TOKENS.stroke.hairline,
+                                theme.ui.border_control,
+                            ))
+                            .corner_radius(theme.radius.md as u8)
+                            .min_size(Vec2::new(
+                                0.0,
+                                DESIGN_TOKENS.sizing.settings_dialog.button_height,
+                            )),
+                        )
+                        .clicked()
+                {
+                    action = SettingsAction::ApplyToAll(Box::new(self.settings.clone()));
+                    self.is_open = false;
+                }
+            });
+        if ok {
+            action = SettingsAction::Apply(Box::new(self.settings.clone()));
+            self.is_open = false;
+        } else if cancel {
+            action = SettingsAction::Cancel;
+            self.is_open = false;
+        }
+        action
+    }
+
+    fn draw_template_button(&self, ui: &mut Ui, theme: &Theme) -> Response {
+        let template_label = if self.template_name.is_empty() {
+            "Template".to_string()
+        } else {
+            self.template_name.clone()
+        };
+        ui.add_sized(
+            Vec2::new(
+                DESIGN_TOKENS.sizing.settings_dialog.template_button_width,
+                DESIGN_TOKENS.sizing.settings_dialog.button_height,
+            ),
+            egui::Button::new((
+                RichText::new(l10n::text(ui.ctx(), &template_label))
+                    .size(theme.text.title)
+                    .color(theme.ui.text),
+                embedded_icons::CHEVRON_DOWN.as_image_tinted(Vec2::splat(12.0), theme.ui.text),
+            ))
+            .truncate()
+            .fill(theme.ui.panel_bg)
+            .stroke(egui::Stroke::new(
+                DESIGN_TOKENS.stroke.hairline,
+                theme.ui.border_control,
+            ))
+            .corner_radius(theme.radius.md as u8)
+            .min_size(Vec2::new(
+                DESIGN_TOKENS.sizing.settings_dialog.template_button_width,
+                DESIGN_TOKENS.sizing.settings_dialog.button_height,
+            )),
+        )
+        .on_hover_text(l10n::text(ui.ctx(), template_label))
+    }
+
+    fn draw_template_menu(
+        &mut self,
+        ui: &mut Ui,
+        theme: &Theme,
+        template_btn: &Response,
+        action: SettingsAction,
+    ) -> SettingsAction {
+        let menu_id = ui.scope_id().with("template_menu");
+        let menu_rect = Rect::from_min_size(
+            template_btn.rect.left_bottom() + Vec2::new(0.0, theme.spacing.xs),
+            Vec2::new(
+                DESIGN_TOKENS.sizing.settings_dialog.template_menu_width,
+                DESIGN_TOKENS
+                    .sizing
+                    .settings_dialog
+                    .template_menu_max_height,
+            ),
+        );
+
+        let result = egui::Area::new(menu_id)
+            .fixed_pos(menu_rect.min)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(theme.ui.panel_bg)
+                    .corner_radius(theme.radius.md as u8)
+                    .stroke(egui::Stroke::new(
+                        DESIGN_TOKENS.stroke.hairline,
+                        theme.ui.border_control,
+                    ))
+                    .show(ui, |ui| {
+                        ui.set_width(DESIGN_TOKENS.sizing.settings_dialog.template_menu_width);
+                        egui::ScrollArea::vertical()
+                            .max_height(
+                                DESIGN_TOKENS
+                                    .sizing
+                                    .settings_dialog
+                                    .template_menu_max_height,
+                            )
+                            .show(ui, |ui| self.draw_template_menu_items(ui, theme, action))
+                            .inner
+                    })
+                    .inner
+            });
+
+        self.handle_template_menu_close(ui, template_btn, result.response.rect);
+        result.inner
+    }
+
+    fn draw_template_menu_items(
+        &mut self,
+        ui: &mut Ui,
+        theme: &Theme,
+        mut action: SettingsAction,
+    ) -> SettingsAction {
+        action = self.draw_save_as_button(ui, action);
+        action = self.draw_update_current_button(ui, action);
+        ui.separator();
+        action = self.draw_template_list(ui, theme, action);
+        ui.separator();
+        self.draw_reset_button(ui);
+        action
+    }
+
+    fn draw_save_as_button(&mut self, ui: &mut Ui, mut action: SettingsAction) -> SettingsAction {
+        if let Some(name) = &mut self.save_name {
+            let label = ui.label(l10n::text(ui.ctx(), "Template name"));
+            ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width()))
+                .labelled_by(label.id);
+            let name = name.trim().to_owned();
+            let label = if self.templates.entries().contains_key(&name) {
+                "Replace"
+            } else {
+                "Save"
+            };
+            let save = ui
+                .add_enabled(
+                    self.templates.ready() && !name.is_empty(),
+                    egui::Button::new(l10n::text(ui.ctx(), label)),
+                )
+                .clicked();
+            let cancel = ui.button(l10n::text(ui.ctx(), "Cancel")).clicked();
+            if save {
+                match self.templates.save(&name, self.settings.clone()) {
+                    Ok(()) => {
+                        self.template_name = name.clone();
+                        action = SettingsAction::SaveTemplate(name);
+                        self.save_name = None;
+                    }
+                    Err(error) => self.templates.error = Some(error),
+                }
+            } else if cancel {
+                self.save_name = None;
+            }
+        } else if ui
+            .button(
+                RichText::new(l10n::text(ui.ctx(), "Save as...")).size(ui.active_theme().text.body),
+            )
+            .clicked()
+        {
+            self.save_name = Some(String::new());
+        }
+        if let Some(error) = &self.templates.error {
+            ui.colored_label(ui.visuals().error_fg_color, l10n::text(ui.ctx(), error));
+            if !self.templates.ready()
+                && ui
+                    .button(l10n::text(ui.ctx(), "Retry loading templates"))
+                    .clicked()
+            {
+                self.templates.reload();
+            }
+        }
+
+        action
+    }
+
+    fn draw_update_current_button(
+        &mut self,
+        ui: &mut Ui,
+        mut action: SettingsAction,
+    ) -> SettingsAction {
+        if !self.template_name.is_empty()
+            && ui
+                .add_enabled(
+                    self.templates.ready(),
+                    egui::Button::new(
+                        RichText::new(l10n::text(ui.ctx(), "Update current"))
+                            .size(ui.active_theme().text.body),
+                    ),
+                )
+                .clicked()
+        {
+            match self
+                .templates
+                .save(&self.template_name, self.settings.clone())
+            {
+                Ok(()) => action = SettingsAction::SaveTemplate(self.template_name.clone()),
+                Err(error) => self.templates.error = Some(error),
+            }
+        }
+        action
+    }
+
+    fn draw_template_list(
+        &mut self,
+        ui: &mut Ui,
+        theme: &Theme,
+        mut action: SettingsAction,
+    ) -> SettingsAction {
+        let templates: Vec<String> = self.templates.entries().keys().cloned().collect();
+
+        if templates.is_empty() {
+            ui.label(
+                RichText::new(l10n::text(ui.ctx(), "No saved templates"))
+                    .size(theme.text.small)
+                    .color(theme.ui.text_secondary),
+            );
+        } else {
+            for name in templates {
+                action = self.draw_template_item(ui, theme, name, action);
+            }
+        }
+        action
+    }
+
+    fn draw_template_item(
+        &mut self,
+        ui: &mut Ui,
+        theme: &Theme,
+        name: String,
+        mut action: SettingsAction,
+    ) -> SettingsAction {
+        let is_sel = self.template_name == name;
+        let text = if is_sel {
+            RichText::new(l10n::text(ui.ctx(), &name))
+                .size(theme.text.body)
+                .color(theme.ui.text)
+        } else {
+            RichText::new(l10n::text(ui.ctx(), &name)).size(theme.text.body)
+        };
+
+        if ui
+            .add_enabled(self.templates.ready(), egui::Button::new(text).truncate())
+            .on_hover_text(l10n::text(ui.ctx(), &name))
+            .clicked()
+        {
+            if let Some(template) = self.templates.entries().get(&name) {
+                let kind = self.settings.chart_type;
+                let params = template
+                    .chart_type_params
+                    .clone()
+                    .or_else(|| self.settings.chart_type_params.clone());
+                let source = template.price_source.or(self.settings.price_source);
+                self.settings = template.clone();
+                self.settings.chart_type = kind;
+                self.settings.chart_type_params = params;
+                self.settings.price_source = source;
+                // A template saved before volume candles had a style shows what they drew, which
+                // Ok then applies with any edits made before it.
+                if kind == crate::model::ChartType::VolumeCandles
+                    && let Some(params) = &mut self.settings.chart_type_params
+                    && (template.chart_type_params.is_none()
+                        || params.styles.volume_candles.is_saved_without_style())
+                {
+                    let colors = &mut self.settings.candle_colors;
+                    let style = crate::model::VolumeCandlesStyle::drawn_before_style(
+                        colors.body_up,
+                        colors.body_down,
+                    );
+                    *colors = crate::widget::settings::CandleColorConfig {
+                        color_by_previous_close: colors.color_by_previous_close,
+                        show_body: style.body_visible,
+                        show_border: style.border_visible,
+                        show_wick: style.wick_visible,
+                        body_up: style.body_up,
+                        body_down: style.body_down,
+                        border_up: style.border_up,
+                        border_down: style.border_down,
+                        wick_up: style.wick_up,
+                        wick_down: style.wick_down,
+                    };
+                    params.styles.volume_candles = style;
+                }
+                self.template_name = name.clone();
+                self.update_color_pickers_from_settings();
+                action = SettingsAction::LoadTemplate(name.clone());
+            }
+            self.template_menu_open = false;
+        }
+        if ui
+            .add_enabled(
+                self.templates.ready(),
+                egui::Button::new(l10n::format_text(
+                    ui.ctx(),
+                    "Delete {name}",
+                    &[("name", name.to_string())],
+                ))
+                .truncate(),
+            )
+            .clicked()
+        {
+            match self.templates.delete(&name) {
+                Ok(()) => {
+                    if self.template_name == name {
+                        self.template_name.clear();
+                    }
+                }
+                Err(error) => self.templates.error = Some(error),
+            }
+        }
+        action
+    }
+
+    fn draw_reset_button(&mut self, ui: &mut Ui) {
+        if ui
+            .button(
+                RichText::new(l10n::text(ui.ctx(), "Reset to defaults"))
+                    .size(ui.active_theme().text.body),
+            )
+            .clicked()
+        {
+            self.settings = ChartSettingsState {
+                chart_type: self.settings.chart_type,
+                chart_type_params: Some(Default::default()),
+                price_source: Some(Default::default()),
+                ..Default::default()
+            };
+            let theme = ui.active_theme();
+            self.settings.scales_appearance.text_color = theme.chart.axis_text;
+            self.settings.grid_lines.horizontal_color = theme.chart.grid_line;
+            self.settings.grid_lines.vertical_color = theme.chart.grid_line;
+            self.settings.crosshair.color = theme.chart.crosshair_line;
+            self.settings.watermark.color = crate::config::ChartConfig::default()
+                .with_theme(&theme)
+                .watermark_color;
+            if matches!(
+                self.settings.chart_type,
+                crate::model::ChartType::Heikin
+                    | crate::model::ChartType::HollowCandles
+                    | crate::model::ChartType::VolumeCandles
+            ) {
+                self.settings.candle_colors.show_border = true;
+            }
+            self.template_name.clear();
+            self.update_color_pickers_from_settings();
+            self.template_menu_open = false;
+        }
+    }
+
+    fn handle_template_menu_close(&mut self, ui: &Ui, template_btn: &Response, menu_rect: Rect) {
+        if ui.input(|i| i.pointer.any_click())
+            && !template_btn.hovered()
+            && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+            && !menu_rect.contains(pos)
+        {
+            self.template_menu_open = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Pos2;
+
+    #[test]
+    fn reset_colours_match_a_new_chart_under_each_theme() {
+        for (preset, theme) in [
+            ("light", Theme::light()),
+            ("dark", Theme::dark()),
+            ("high contrast", Theme::high_contrast()),
+        ] {
+            for (templates_visible, size) in [
+                (true, Vec2::new(1440.0, 900.0)),
+                (false, Vec2::new(1440.0, 900.0)),
+                (true, Vec2::new(320.0, 450.0)),
+                (false, Vec2::new(320.0, 450.0)),
+            ] {
+                let ctx = Context::default();
+                crate::theme::apply_to_egui(&ctx, &theme);
+                let mut chart = crate::ChartBuilder::new().with_theme(theme.clone()).build();
+                let expected = ChartSettingsState::from_chart(&chart);
+                let crosshair = chart.chart_options().crosshair.resolved(&ctx);
+                let mut settings = expected.clone();
+                settings.scales_appearance.text_color = Color32::RED;
+                settings.grid_lines.horizontal_color = Color32::GREEN;
+                settings.grid_lines.vertical_color = Color32::BLUE;
+                settings.crosshair.color = Color32::YELLOW;
+                settings.watermark.color = Color32::RED;
+                let mut dialog = SettingsDialog::new();
+                dialog.set_control_visible(Control::Templates, templates_visible);
+                dialog.open(settings);
+                let mut frame = |events, label: &str| {
+                    let mut action = SettingsAction::None;
+                    let output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| action = dialog.show(ui.ctx(), &theme),
+                    );
+                    let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(text.pos + text.galley.size() / 2.0)
+                        }
+                        _ => None,
+                    });
+                    output.drop_without_applying_deltas();
+                    (action, pos)
+                };
+                let mut action = SettingsAction::None;
+                let buttons: &[&str] = if templates_visible {
+                    &["Template", "Reset to defaults", "Ok"]
+                } else {
+                    &["Reset to defaults", "Ok"]
+                };
+                for label in buttons {
+                    frame(vec![], label);
+                    let pos = frame(vec![], label).1.expect(label);
+                    assert!(
+                        Rect::from_min_size(Pos2::ZERO, size).contains(pos),
+                        "{label} at {size:?}"
+                    );
+                    frame(vec![egui::Event::PointerMoved(pos)], label);
+                    for pressed in [true, false] {
+                        action = frame(
+                            vec![egui::Event::PointerButton {
+                                pos,
+                                pressed,
+                                button: egui::PointerButton::Primary,
+                                modifiers: Default::default(),
+                            }],
+                            label,
+                        )
+                        .0;
+                    }
+                }
+                let SettingsAction::Apply(settings) = action else {
+                    panic!("Ok must apply the reset settings");
+                };
+                assert!(!dialog.is_open);
+                settings.apply_to_chart(&mut chart).unwrap();
+                let actual = ChartSettingsState::from_chart(&chart);
+                let mismatches: Vec<_> = [
+                    (
+                        "axis text",
+                        actual.scales_appearance.text_color,
+                        expected.scales_appearance.text_color,
+                    ),
+                    (
+                        "horizontal grid",
+                        actual.grid_lines.horizontal_color,
+                        expected.grid_lines.horizontal_color,
+                    ),
+                    (
+                        "vertical grid",
+                        actual.grid_lines.vertical_color,
+                        expected.grid_lines.vertical_color,
+                    ),
+                    (
+                        "horizontal crosshair",
+                        chart.chart_options().crosshair.horz_line_color,
+                        crosshair.horz_line_color,
+                    ),
+                    (
+                        "vertical crosshair",
+                        chart.chart_options().crosshair.vert_line_color,
+                        crosshair.vert_line_color,
+                    ),
+                    (
+                        "watermark",
+                        actual.watermark.color,
+                        expected.watermark.color,
+                    ),
+                ]
+                .into_iter()
+                .filter(|(_, actual, expected)| actual != expected)
+                .collect();
+                assert!(
+                    mismatches.is_empty(),
+                    "{preset}, templates visible: {templates_visible}, {size:?}: {mismatches:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_sound_controls_offer_a_preview_without_applying_settings() {
+        let ctx = Context::default();
+        let mut settings = ChartSettingsState::default();
+        settings.trading.play_execution_sound = true;
+        settings.trading.execution_sound = "Bell".into();
+        settings.trading.execution_sound_volume = 0.4;
+        let mut dialog = SettingsDialog::new();
+        dialog.execution_sounds = vec!["Chime".into(), "Bell".into()];
+        dialog.open(settings.clone());
+        dialog.active_tab = SettingsTab::Trading;
+        let mut preview = None;
+        let mut action = SettingsAction::None;
+        for step in 0..5 {
+            let events = match (step, preview) {
+                (3, Some(pos)) | (4, Some(pos)) => vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed: step == 3,
+                        button: egui::PointerButton::Primary,
+                        modifiers: Default::default(),
+                    },
+                ],
+                _ => vec![],
+            };
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| action = dialog.show(ui.ctx(), &Theme::light()),
+            );
+            preview = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Test sound" => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            });
+            output.drop_without_applying_deltas();
+            if step >= 2 {
+                assert!(
+                    preview.is_some(),
+                    "an enabled sound needs a local preview control"
+                );
+            }
+        }
+        assert!(matches!(
+            action,
+            SettingsAction::PreviewSound { name, volume } if name == "Bell" && volume == 0.4
+        ));
+        assert!(dialog.is_open);
+        assert_eq!(dialog.settings(), &settings);
+    }
+
+    #[test]
+    fn symbol_controls_follow_the_chart_type_and_retain_its_parameters() {
+        use crate::{
+            Chart,
+            model::{BarData, ChartType, PriceSource},
+        };
+        for (kind, label) in [
+            (ChartType::Heikin, "Body"),
+            (ChartType::HollowCandles, "Body"),
+            (
+                ChartType::VolumeCandles,
+                "Color bars based on previous close",
+            ),
+            (ChartType::Bars, "Up and down colors"),
+            (ChartType::Line, "Line width"),
+            (ChartType::Baseline, "Base level"),
+            (ChartType::Renko, "Size method"),
+            (ChartType::Range, "Size method"),
+        ] {
+            let mut chart = Chart::new(BarData::new());
+            chart.set_chart_type(kind);
+            let mut params = chart.chart_type_params().clone();
+            params.styles.line.width = 4.5;
+            params.renko_brick_size = 7.0;
+            chart.set_chart_type_params(params.clone());
+            chart.config_mut().price_source = PriceSource::HL2;
+            let settings = ChartSettingsState::from_chart(&chart);
+            let mut dialog = SettingsDialog::new();
+            dialog.open(settings.clone());
+            let ctx = Context::default();
+            let output = ctx.run_ui(Default::default(), |ui| {
+                dialog.draw_symbol_tab(ui, &Theme::light())
+            });
+            let has_label = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == label)
+            });
+            let candle_colors = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == "CANDLES")
+            });
+            output.drop_without_applying_deltas();
+            assert!(has_label, "{kind:?} must offer {label}");
+            assert!(!candle_colors);
+            let mut restored = Chart::new(BarData::new());
+            restored.set_chart_type(kind);
+            settings.apply_to_chart(&mut restored).unwrap();
+            assert_eq!(restored.chart_type_params(), &params);
+            assert_eq!(restored.config().price_source, PriceSource::HL2);
+        }
+    }
+
+    #[test]
+    fn offered_time_zones_and_session_presets_are_available() {
+        use crate::config::SessionConfig;
+        let mut zones = SettingsDialog::new().timezones;
+        zones.extend(
+            [
+                SessionConfig::default(),
+                SessionConfig::nyse(),
+                SessionConfig::lse(),
+                SessionConfig::tse(),
+                SessionConfig::crypto_24_7(),
+                SessionConfig::forex(),
+            ]
+            .map(|session| session.timezone),
+        );
+        for zone in zones {
+            assert!(zone.parse::<crate::model::TimezoneId>().is_ok(), "{zone}");
+        }
+    }
+
+    #[test]
+    fn save_as_prompts_for_a_name_without_saving_automatically() {
+        let ctx = Context::default();
+        let mut dialog = SettingsDialog::new();
+        let mut frame = |events| {
+            let mut action = SettingsAction::None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action = dialog.draw_save_as_button(ui, SettingsAction::None);
+                },
+            );
+            let save_as = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Save as..." => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            });
+            let prompt = output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Template name"));
+            output.drop_without_applying_deltas();
+            assert!(
+                matches!(action, SettingsAction::None),
+                "opening the name form must not save a template"
+            );
+            (save_as, prompt)
+        };
+        let pos = frame(vec![]).0.unwrap();
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(vec![egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            }]);
+        }
+        assert!(frame(vec![]).1);
+    }
+
+    #[test]
+    fn grid_colour_pickers_follow_the_visible_directions() {
+        use crate::widget::settings::GridLinesMode;
+        for theme in [Theme::light(), Theme::dark()] {
+            for (mode, horizontal, vertical) in [
+                (GridLinesMode::None, false, false),
+                (GridLinesMode::Horizontal, true, false),
+                (GridLinesMode::Vertical, false, true),
+                (GridLinesMode::Both, true, true),
+            ] {
+                let ctx = Context::default();
+                crate::theme::apply_to_egui(&ctx, &theme);
+                let mut settings = ChartSettingsState::default();
+                settings.grid_lines.mode = mode;
+                settings.grid_lines.horizontal_color = Color32::from_rgb(151, 32, 19);
+                settings.grid_lines.vertical_color = Color32::from_rgb(29, 43, 157);
+                let mut dialog = SettingsDialog::new();
+                dialog.open(settings.clone());
+                let output = ctx.run_ui(Default::default(), |ui| {
+                    dialog.draw_canvas_tab(ui, &theme);
+                });
+                let shown = [settings.grid_lines.horizontal_color, settings.grid_lines.vertical_color].map(|colour| output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == colour)));
+                output.drop_without_applying_deltas();
+                assert_eq!(shown, [horizontal, vertical], "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_tracks_theme_without_changing_defaults_until_apply() {
+        for (width, apply) in [
+            (1440.0, false),
+            (480.0, false),
+            (1440.0, true),
+            (480.0, true),
+        ] {
+            for configured in [Color32::PLACEHOLDER, Color32::from_rgb(80, 90, 100)] {
+                let ctx = Context::default();
+                let mut dialog = SettingsDialog::new();
+                let mut settings = ChartSettingsState::default();
+                settings.chart_basic_styles.background_color = configured;
+                settings.margins.top_percent = 12.5;
+                settings.margins.bottom_percent = 7.5;
+
+                dialog.open(settings.clone());
+                assert_eq!(dialog.margin_top_str, "12.5");
+                assert_eq!(dialog.margin_bottom_str, "7.5");
+                let mut frame = |theme: &Theme, events| {
+                    crate::theme::apply_to_egui(&ctx, theme);
+                    let mut action = SettingsAction::None;
+                    let output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                Vec2::new(width, 900.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            action = dialog.show(ui.ctx(), theme);
+                        },
+                    );
+                    let symbol = output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Body"));
+                    let ok = output.shapes.iter().find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == "Ok" => {
+                            Some(text.pos + text.galley.size() / 2.0)
+                        }
+                        _ => None,
+                    });
+                    output.drop_without_applying_deltas();
+                    assert_eq!(dialog.settings, settings);
+                    assert_eq!(
+                        dialog.color_picker_states.background.sel_color,
+                        if configured == Color32::PLACEHOLDER {
+                            theme.chart.bg
+                        } else {
+                            configured
+                        }
+                    );
+                    assert_eq!(
+                        dialog.color_picker_states.background_gradient_top.sel_color,
+                        theme.chart.bg
+                    );
+                    assert_eq!(
+                        dialog
+                            .color_picker_states
+                            .background_gradient_bottom
+                            .sel_color,
+                        theme.chart.bg_axis
+                    );
+                    (action, symbol, ok)
+                };
+                for theme in [Theme::light(), Theme::dark(), Theme::light()] {
+                    frame(&theme, vec![]);
+                    assert!(
+                        frame(&theme, vec![]).1,
+                        "settings starts with the symbol controls"
+                    );
+                }
+                let action = if apply {
+                    let pos = frame(&Theme::light(), vec![]).2.unwrap();
+                    let button = |pressed| egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    };
+                    frame(&Theme::light(), vec![egui::Event::PointerMoved(pos)]);
+                    frame(&Theme::light(), vec![button(true)]);
+                    frame(&Theme::light(), vec![button(false)]).0
+                } else {
+                    frame(
+                        &Theme::light(),
+                        vec![egui::Event::Key {
+                            key: egui::Key::Escape,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Default::default(),
+                        }],
+                    )
+                    .0
+                };
+                if apply {
+                    let SettingsAction::Apply(saved) = action else {
+                        panic!("expected Apply");
+                    };
+                    let expected = if configured == Color32::PLACEHOLDER {
+                        Theme::light().chart.bg
+                    } else {
+                        configured
+                    };
+                    assert_eq!(saved.chart_basic_styles.background_color, expected);
+                    assert_eq!(
+                        saved.chart_basic_styles.background_gradient_top,
+                        Theme::light().chart.bg
+                    );
+                    assert_eq!(
+                        saved.chart_basic_styles.background_gradient_bottom,
+                        Theme::light().chart.bg_axis
+                    );
+                } else {
+                    assert!(matches!(action, SettingsAction::Cancel));
+                }
+                assert!(!dialog.is_open);
+                assert_eq!(dialog.settings, settings);
+            }
+        }
+    }
+    #[test]
+    fn scale_controls_show_small_ratios_and_keep_modes_exclusive() {
+        let ctx = Context::default();
+        let mut dialog = SettingsDialog::new();
+        let theme = Theme::light();
+        for (label, expected, ratio) in [
+            ("Log scale", (true, false), 0.005),
+            ("Percentage scale", (false, true), 0.00000001),
+            ("Log scale", (true, false), 1.0),
+        ] {
+            dialog.settings.scales_and_lines.price_to_bar_ratio = ratio;
+            dialog.settings.scales_and_lines.lock_price_to_bar_ratio = true;
+            let mut frame =
+                |events| {
+                    let output = ctx.run_ui(
+                        egui::RawInput {
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            dialog.draw_scales_and_lines_tab(ui, &theme);
+                        },
+                    );
+                    let ratio_shown = output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if text.galley.text().parse::<f64>() == Ok(ratio)
+                    ));
+                    let pos = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.text() == label => {
+                                Some(text.pos + text.galley.size() / 2.0)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    output.drop_without_applying_deltas();
+                    assert!(ratio_shown, "entered ratio {ratio} must remain legible");
+                    pos
+                };
+            let pos = frame(vec![]);
+            frame(vec![egui::Event::PointerMoved(pos)]);
+            for pressed in [true, false] {
+                frame(vec![egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: Default::default(),
+                }]);
+            }
+            assert_eq!(
+                (
+                    dialog.settings.scales_and_lines.log_scale,
+                    dialog.settings.scales_and_lines.percentage_scale
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn order_flow_controls_follow_declared_services_and_tick_size() {
+        use crate::data::FeedCapabilities;
+        use crate::model::{FeedService::*, Instrument};
+        let feed = FeedCapabilities::new().with_services([
+            Trades,
+            LiveTrades,
+            Depth,
+            DepthHistory,
+            OrderDepth,
+        ]);
+        for (services, tick, expected) in [
+            (None, Some(0.25), [true, true, true, true]),
+            (
+                Some(vec![LiveTrades]),
+                Some(0.25),
+                [false, false, false, true],
+            ),
+            (Some(vec![Trades]), Some(0.25), [false, false, false, true]),
+            (Some(vec![Depth]), Some(0.25), [true, true, false, false]),
+            (
+                Some(vec![DepthHistory]),
+                Some(0.25),
+                [true, false, false, false],
+            ),
+            (
+                Some(vec![Depth, OrderDepth]),
+                Some(0.25),
+                [true, true, true, false],
+            ),
+            (Some(vec![OrderDepth]), Some(0.25), [false; 4]),
+            (Some(vec![]), Some(0.25), [false; 4]),
+            (Some(vec![Depth]), None, [false; 4]),
+            (Some(vec![Depth]), Some(0.0), [false; 4]),
+            (Some(vec![Depth]), Some(f64::NAN), [false; 4]),
+        ] {
+            let ctx = Context::default();
+            let theme = Theme::light();
+            crate::theme::apply_to_egui(&ctx, &theme);
+            let mut dialog = SettingsDialog::new();
+            dialog.open(ChartSettingsState::default());
+            let mut instrument = Instrument::new("A");
+            instrument.services = services;
+            instrument.tick_size = tick;
+            dialog.set_feed_capabilities(Some(&feed), Some(&instrument));
+            assert_eq!(dialog.order_flow_layers, expected);
+            for pass in 0..3 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1440.0, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        dialog.show(ui.ctx(), &theme);
+                    },
+                );
+                let tab = output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == "Order flow")
+                });
+                output.drop_without_applying_deltas();
+                if pass == 2 {
+                    assert_eq!(tab, expected.iter().any(|available| *available));
+                }
+            }
+            // Existing overlay configs define fallback behaviour for these values.
+            dialog.settings.order_flow.heatmap.full_intensity_size = Some(0.0);
+            dialog.settings.order_flow.volume_bubbles.grouping =
+                crate::chart::overlays::BubbleGrouping::Executions(0);
+            let before = dialog.settings.clone();
+            let output = ctx.run_ui(Default::default(), |ui| {
+                dialog.draw_order_flow_tab(ui, &theme);
+            });
+            for (label, shown) in [
+                ("Market depth heatmap", expected[0]),
+                ("Order book", expected[1]),
+                ("Volume bubbles", expected[3]),
+            ] {
+                assert_eq!(
+                    output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == label)),
+                    shown,
+                    "{label}"
+                );
+            }
+            output.drop_without_applying_deltas();
+            assert_eq!(
+                dialog.settings, before,
+                "viewing controls must preserve host preferences"
+            );
+            dialog.active_tab = SettingsTab::OrderFlow;
+            dialog.set_feed_capabilities(Some(&feed), None);
+            assert_eq!(dialog.active_tab, SettingsTab::Symbol);
+        }
+        let mut dialog = SettingsDialog::new();
+        assert_eq!(dialog.order_flow_layers, [true; 4]);
+        let instrument = Instrument::new("A")
+            .with_tick_size(0.25)
+            .with_services([Depth]);
+        dialog.set_feed_capabilities(None, Some(&instrument));
+        assert_eq!(dialog.order_flow_layers, [true, true, false, false]);
+        dialog.set_feed_capabilities(
+            Some(&FeedCapabilities::new().with_services([])),
+            Some(&instrument),
+        );
+        assert_eq!(dialog.order_flow_layers, [false; 4]);
+        dialog.set_feed_capabilities(None, Some(&Instrument::new("A").with_tick_size(0.25)));
+        assert_eq!(dialog.order_flow_layers, [false; 4]);
+    }
+
+    #[test]
+    fn order_flow_heatmap_switch_applies_without_enabling_other_layers() {
+        let ctx = Context::default();
+        let theme = Theme::light();
+        crate::theme::apply_to_egui(&ctx, &theme);
+        let mut dialog = SettingsDialog::new();
+        let mut settings = ChartSettingsState::default();
+        settings.order_flow.heatmap.lower_cutoff = 0.00000001;
+        settings.order_flow.heatmap.full_intensity_size = Some(0.00000002);
+        dialog.open(settings);
+        dialog.active_tab = SettingsTab::OrderFlow;
+        let mut frame = |events| {
+            let mut action = SettingsAction::None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    action = dialog.show(ui.ctx(), &theme);
+                },
+            );
+            let positions = ["Market depth heatmap", "Ok"].map(|label| {
+                output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                })
+            });
+            let sizes_visible = [0.00000001, 0.00000002].map(|value| {
+                output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text().parse::<f64>() == Ok(value))
+                })
+            });
+            output.drop_without_applying_deltas();
+            (action, positions, sizes_visible)
+        };
+        frame(vec![]);
+        frame(vec![]);
+        for index in [0, 1] {
+            let pos = frame(vec![]).1[index].unwrap();
+            frame(vec![egui::Event::PointerMoved(pos)]);
+            frame(vec![egui::Event::PointerButton {
+                pos,
+                pressed: true,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            }]);
+            let (action, _, _) = frame(vec![egui::Event::PointerButton {
+                pos,
+                pressed: false,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            }]);
+            if index == 0 {
+                assert_eq!(
+                    frame(vec![]).2,
+                    [true; 2],
+                    "small sizes must remain legible"
+                );
+            }
+            if index == 1 {
+                let SettingsAction::Apply(saved) = action else {
+                    panic!("expected Apply")
+                };
+                assert!(saved.order_flow.show_heatmap);
+                assert!(!saved.order_flow.show_volume_bubbles);
+                assert!(!saved.order_flow.show_order_book);
+                dialog.open(*saved);
+                assert!(dialog.settings().order_flow.show_heatmap);
+                assert!(!dialog.settings().order_flow.show_volume_bubbles);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn changing_settings_tabs_keeps_the_top_edge_and_fits_the_window() {
+        let mut scaled = Theme::light();
+        scaled.text.small = 17.0;
+        scaled.spacing.lg = 12.0;
+        scaled.spacing.xxxl = 32.0;
+        for theme in [Theme::light(), Theme::dark(), scaled] {
+            let ctx = Context::default();
+            crate::theme::apply_to_egui(&ctx, &theme);
+            let mut dialog = SettingsDialog::new();
+            dialog.open(ChartSettingsState::default());
+            dialog.template_name = "Long template name ".repeat(20);
+            for size in [
+                Vec2::new(1440.0, 900.0),
+                Vec2::new(600.0, 400.0),
+                Vec2::new(320.0, 450.0),
+                Vec2::new(1440.0, 900.0),
+            ] {
+                let mut tops = Vec::new();
+                for tab in SettingsTab::all().iter().chain(&[
+                    SettingsTab::Events,
+                    SettingsTab::Symbol,
+                    SettingsTab::Events,
+                ]) {
+                    dialog.active_tab = *tab;
+                    for pass in 0..3 {
+                        let output = ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                                ..Default::default()
+                            },
+                            |ui| {
+                                dialog.show(ui.ctx(), &theme);
+                            },
+                        );
+                        let sidebar = output.shapes.iter().find_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(row)
+                                if row.rect.height() == 40.0
+                                    && row.rect.width() <= SIDEBAR_WIDTH =>
+                            {
+                                Some(row.rect)
+                            }
+                            _ => None,
+                        });
+                        let labels_fit = sidebar.is_none_or(|row| {
+                            output.shapes.iter().all(|shape| match &shape.shape {
+                                egui::Shape::Text(text)
+                                    if SettingsTab::all()
+                                        .iter()
+                                        .any(|tab| tab.name() == text.galley.text()) =>
+                                {
+                                    text.pos.x + text.galley.size().x <= row.right() + 0.5
+                                }
+                                _ => true,
+                            })
+                        });
+                        let heading = output.shapes.iter().find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.text() == "CANDLES" => {
+                                Some(text.galley.job.sections[0].format.font_id.size)
+                            }
+                            _ => None,
+                        });
+                        output.drop_without_applying_deltas();
+                        if pass == 2 {
+                            assert!(
+                                labels_fit,
+                                "tab labels must stay in the sidebar at {size:?}"
+                            );
+                        }
+                        if *tab == SettingsTab::Symbol && pass == 2 {
+                            assert_eq!(heading, Some(theme.text.small));
+                        }
+                    }
+                    let rect = ctx
+                        .memory(|memory| memory.area_rect(egui::Id::unique("chart_settings")))
+                        .unwrap();
+                    assert!(
+                        Rect::from_min_size(Pos2::ZERO, size).contains_rect(rect),
+                        "{tab:?}: {rect:?} in {size:?}"
+                    );
+                    tops.push(rect.top());
+                }
+                assert!(
+                    tops.iter().all(|top| (top - tops[0]).abs() < 1.0),
+                    "{tops:?}"
+                );
+            }
+        }
+    }
+
+    /// A template saved before volume candles had a style, with or without chart type
+    /// parameters, holds the candle settings of the candles chart type, of which volume candles
+    /// drew only the body colours. Loaded for a volume candles chart it shows them as drawn, the
+    /// body colours on the body and both wicks without a border, and an edit made before Ok
+    /// applies.
+    #[test]
+    fn old_templates_load_volume_candles_as_drawn_and_keep_edits() {
+        use crate::model::{Bar, BarData, ChartType};
+        use crate::widget::settings::CandleColorConfig;
+        let (up, down) = (Color32::from_rgb(1, 100, 2), Color32::from_rgb(101, 2, 3));
+        let (border, wick) = (Color32::from_rgb(3, 4, 102), Color32::from_rgb(105, 106, 6));
+        for (parent, entry) in [
+            ("/chart_type_params/styles", "volume_candles"),
+            ("", "chart_type_params"),
+        ] {
+            let mut chart = crate::Chart::new(BarData::from_bars(vec![Bar::new(
+                chrono::DateTime::UNIX_EPOCH,
+                10.0,
+                18.0,
+                8.0,
+                14.0,
+                100.0,
+            )]));
+            chart.set_chart_type(ChartType::VolumeCandles);
+            let mut saved = serde_json::to_value(ChartSettingsState::from_chart(&chart)).unwrap();
+            let object = saved.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+            object.remove(entry).unwrap();
+            saved["candle_colors"] = serde_json::to_value(CandleColorConfig {
+                color_by_previous_close: true,
+                show_body: true,
+                show_border: true,
+                show_wick: false,
+                body_up: up,
+                body_down: down,
+                border_up: border,
+                border_down: border,
+                wick_up: wick,
+                wick_down: wick,
+            })
+            .unwrap();
+            let mut dialog = SettingsDialog::new();
+            dialog
+                .templates
+                .save("Old", serde_json::from_value(saved).unwrap())
+                .unwrap();
+            dialog.open(ChartSettingsState::from_chart(&chart));
+            let ctx = Context::default();
+            let mut item = None;
+            for step in 0..4 {
+                let events = match (step, item) {
+                    (2, Some(pos)) | (3, Some(pos)) => vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            pressed: step == 2,
+                            button: egui::PointerButton::Primary,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    _ => vec![],
+                };
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        dialog.draw_template_item(
+                            ui,
+                            &Theme::light(),
+                            "Old".into(),
+                            SettingsAction::None,
+                        );
+                    },
+                );
+                item = item.or(output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Old" => {
+                        Some(text.pos + text.galley.size() / 2.0)
+                    }
+                    _ => None,
+                }));
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(dialog.template_name, "Old", "{entry}");
+            assert_eq!(
+                dialog.settings().candle_colors,
+                CandleColorConfig {
+                    color_by_previous_close: true,
+                    show_body: true,
+                    show_border: false,
+                    show_wick: true,
+                    body_up: up,
+                    body_down: down,
+                    border_up: up,
+                    border_down: down,
+                    wick_up: up,
+                    wick_down: down,
+                },
+                "{entry}"
+            );
+            dialog.settings.candle_colors.show_border = true;
+            dialog.settings().apply_to_chart(&mut chart).unwrap();
+            let style = &chart.chart_type_params().styles.volume_candles;
+            assert!(style.border_visible, "{entry}");
+            assert_eq!([style.border_up, style.wick_down], [up, down], "{entry}");
+        }
+    }
+}

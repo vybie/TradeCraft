@@ -1,0 +1,24 @@
+[package]
+name = "tradecraft-ui-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+vibestrader-credential = ["tradecraft-providers/vibestrader-credential", "tradecraft-engine/vibestrader-credential"]
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+tradecraft-core.workspace = true
+tradecraft-engine.workspace = true
+tradecraft-providers.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+egui = "0.37"
+egui-charts = { path = "../../vendor/egui-charts", default-features = false, features = ["widget", "timezones", "studies"] }
+egui-charts-terminal = { path = "../../vendor/egui-charts/terminal" }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde_json = "1"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu"] }

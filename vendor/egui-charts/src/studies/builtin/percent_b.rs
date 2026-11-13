@@ -1,0 +1,186 @@
+use super::clamp_param;
+use crate::model::Bar;
+use crate::studies::palette;
+use crate::studies::stepper::update_window;
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Percent B (%B)
+/// Shows where price is relative to Bollinger Bands
+/// 0 = at lower band, 1 = at upper band
+#[derive(Clone)]
+pub struct PercentB {
+    /// Period for Bollinger Bands (typically 20)
+    period: usize,
+    /// Standard deviation multiplier (typically 2.0)
+    multiplier: f64,
+    values: IndicatorValues,
+    color: Color32,
+    visible: bool,
+}
+
+impl PercentB {
+    /// `multiplier` is clamped into 0 to `f64::MAX`, NaN to 0.
+    pub fn new(period: usize, multiplier: f64) -> Self {
+        Self {
+            period: period.max(1),
+            multiplier: clamp_param(multiplier, 0.0, f64::MAX),
+            values: IndicatorValues::new(),
+            color: palette::BLUE,
+            visible: true,
+        }
+    }
+
+    /// Set the plot color.
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = color;
+        self
+    }
+}
+
+impl Default for PercentB {
+    fn default() -> Self {
+        Self::new(20, 2.0)
+    }
+}
+
+impl PercentB {
+    fn compute(&self, data: &[Bar]) -> IndicatorValues {
+        let mut values = IndicatorValues::new();
+
+        if data.len() < self.period {
+            for _ in 0..data.len() {
+                values.push(IndicatorValue::None);
+            }
+            return values;
+        }
+
+        for i in 0..data.len() {
+            if i < self.period - 1 {
+                values.push(IndicatorValue::None);
+            } else {
+                let window = &data[i + 1 - self.period..=i];
+
+                // Calculate SMA
+                let sma: f64 = window.iter().map(|b| b.close).sum::<f64>() / self.period as f64;
+
+                // Calculate standard deviation
+                let variance: f64 = window.iter().map(|b| (b.close - sma).powi(2)).sum::<f64>()
+                    / self.period as f64;
+                let std_dev = variance.sqrt();
+
+                // Calculate bands
+                let upper = sma + self.multiplier * std_dev;
+                let lower = sma - self.multiplier * std_dev;
+
+                // Calculate %B
+                let band_width = upper - lower;
+                if band_width == 0.0 {
+                    values.push(IndicatorValue::Single(0.5));
+                } else {
+                    let percent_b = (data[i].close - lower) / band_width;
+                    values.push(IndicatorValue::Single(percent_b));
+                }
+            }
+        }
+        values
+    }
+}
+
+impl Indicator for PercentB {
+    fn source(&self) -> Option<crate::studies::StudySource> {
+        Some(crate::studies::StudySource::Price(
+            crate::model::PriceSource::Close,
+        ))
+    }
+
+    crate::studies::inputs::study_inputs!(self;
+        period: length("Period", 1, usize::MAX),
+        multiplier: number("Multiplier", 0.0, f64::MAX)
+    ; {});
+
+    fn name(&self) -> &str {
+        "%B"
+    }
+
+    fn desc(&self) -> &str {
+        "Percent B - Price position within Bollinger Bands"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let mut values = std::mem::take(&mut self.values);
+        update_window(
+            &mut values,
+            data,
+            from,
+            |_data, from| from.saturating_sub(self.period - 1),
+            |data| self.compute(data),
+        );
+        self.values = values;
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        vec![self.color]
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if !colors.is_empty() {
+            self.color = colors[0];
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        false
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        vec![format!("%B({},{})", self.period, self.multiplier)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studies::test_support::make_bar;
+
+    #[test]
+    fn test_percent_b() {
+        let mut pb = PercentB::new(5, 2.0);
+
+        // Constant prices = no volatility = %B should be ~0.5
+        let data: Vec<Bar> = (0..10).map(|_| make_bar(100.0)).collect();
+
+        pb.calculate(&data);
+
+        let rows = pb.values.to_rows();
+        let IndicatorValue::Single(v) = rows.last().unwrap() else {
+            panic!("no value: {:?}", pb.values.to_rows().last().unwrap());
+        };
+        // Constant prices collapse the bands to a point: %B is the middle of the band
+        assert_eq!(*v, 0.5);
+    }
+}

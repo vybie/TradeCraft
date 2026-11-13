@@ -1,0 +1,284 @@
+//! Multi-Chart Sync Options Button
+//!
+//! A button with dropdown for configuring multi-chart synchronization options.
+//! Only visible when in multi-chart layout mode.
+
+use crate::icons::icons as embedded_icons;
+use crate::localization as l10n;
+use crate::theme::ThemeExt;
+use crate::tokens::DESIGN_TOKENS;
+use crate::ui::multi_chart::ChartSyncOptions;
+use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+
+/// Sync options button widget
+pub struct SyncButton {
+    /// Is dropdown open
+    is_open: bool,
+    /// Current sync options
+    options: ChartSyncOptions,
+}
+
+impl Default for SyncButton {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SyncButton {
+    /// Create new sync button with default options
+    pub fn new() -> Self {
+        Self {
+            is_open: false,
+            options: ChartSyncOptions::default(),
+        }
+    }
+
+    /// Set current sync options
+    pub fn set_options(&mut self, options: ChartSyncOptions) {
+        self.options = options;
+    }
+
+    /// Get current sync options
+    pub fn options(&self) -> &ChartSyncOptions {
+        &self.options
+    }
+
+    /// Show the button and return updated options if changed
+    pub fn show(&mut self, ui: &mut Ui) -> Option<ChartSyncOptions> {
+        let mut result = None;
+
+        // Main button
+        let btn_response = self.draw_button(ui);
+        if btn_response.clicked() {
+            self.is_open = !self.is_open;
+        }
+
+        // Dropdown
+        if self.is_open {
+            let btn_rect = btn_response.rect;
+            if let Some(new_options) = self.draw_dropdown(ui, btn_rect) {
+                self.options = new_options.clone();
+                result = Some(new_options);
+            }
+
+            // Close on click outside
+            if ui.input(|i| i.pointer.any_click())
+                && let Some(pos) = ui.input(|i| i.pointer.hover_pos())
+            {
+                let dropdown_rect = self.dropdown_rect(ui, btn_rect);
+                if !btn_rect.contains(pos) && !dropdown_rect.contains(pos) {
+                    self.is_open = false;
+                }
+            }
+        }
+
+        result
+    }
+
+    fn draw_button(&self, ui: &mut Ui) -> Response {
+        let visuals = ui.style().visuals.clone();
+        let hover_color = visuals.widgets.hovered.bg_fill;
+        let border_color = visuals.widgets.noninteractive.bg_stroke.color;
+        let accent_color = ui.active_theme().ui.accent;
+
+        // Check if any sync is enabled
+        let any_sync_enabled = self.options.sync_time_axis
+            || self.options.sync_crosshair
+            || self.options.sync_drawings
+            || self.options.sync_symbol
+            || self.options.sync_timeframe;
+
+        let desired_size = Vec2::splat(DESIGN_TOKENS.sizing.button_md);
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+        let translated_label = l10n::text(ui.ctx(), "Chart Sync Options");
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::Role::Button,
+                response.enabled(),
+                any_sync_enabled,
+                &translated_label,
+            )
+        });
+        crate::styles::focus::draw_focus_ring(ui, &response, ui.active_theme().radius.md);
+
+        // Background - highlight if sync is enabled
+        let bg_color = if self.is_open || response.hovered() {
+            hover_color
+        } else if any_sync_enabled {
+            accent_color.gamma_multiply(0.3)
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter()
+            .rect_filled(rect, ui.active_theme().radius.md, bg_color);
+        ui.painter().rect_stroke(
+            rect,
+            ui.active_theme().radius.md,
+            Stroke::new(DESIGN_TOKENS.stroke.hairline, border_color),
+            StrokeKind::Outside,
+        );
+
+        // Sync icon (using layout grid as visual representation)
+        let icon_rect =
+            Rect::from_center_size(rect.center(), Vec2::splat(DESIGN_TOKENS.sizing.icon_sm));
+        let icon_color = if any_sync_enabled {
+            accent_color
+        } else if response.hovered() {
+            ui.visuals().widgets.hovered.fg_stroke.color
+        } else {
+            ui.visuals().widgets.noninteractive.fg_stroke.color
+        };
+        embedded_icons::LAYOUT_GRID
+            .as_image_tinted(Vec2::splat(DESIGN_TOKENS.sizing.icon_sm), icon_color)
+            .paint_at(ui, icon_rect);
+
+        response.on_hover_text(l10n::text(ui.ctx(), "Chart Sync Options"))
+    }
+
+    fn dropdown_rect(&self, ui: &Ui, btn_rect: Rect) -> Rect {
+        let item_height = DESIGN_TOKENS.sizing.button_md;
+        let item_count = 5; // 5 sync options
+        let dropdown_height = item_count as f32 * item_height + ui.active_theme().spacing.md * 2.0;
+        let dropdown_width = 180.0;
+        Rect::from_min_size(
+            Pos2::new(
+                btn_rect.min.x,
+                btn_rect.max.y + ui.active_theme().spacing.xs,
+            ),
+            Vec2::new(dropdown_width, dropdown_height),
+        )
+    }
+
+    fn draw_dropdown(&mut self, ui: &mut Ui, btn_rect: Rect) -> Option<ChartSyncOptions> {
+        let visuals = ui.style().visuals.clone();
+        let bg_color = visuals.window_fill;
+        let border_color = visuals.widgets.noninteractive.bg_stroke.color;
+        let hover_color = visuals.widgets.hovered.bg_fill;
+        let text_color = visuals.text_color();
+        let colors = ui.active_theme().ui;
+        let (accent_color, check_color) = (colors.accent, colors.accent_text);
+
+        let dropdown_rect = self.dropdown_rect(ui, btn_rect);
+
+        // Shadow
+        let shadow_rect = dropdown_rect.translate(Vec2::splat(DESIGN_TOKENS.shadow.offset_sm));
+        ui.painter().rect_filled(
+            shadow_rect,
+            ui.active_theme().radius.md,
+            Color32::from_black_alpha(60),
+        );
+
+        // Background
+        ui.painter()
+            .rect_filled(dropdown_rect, ui.active_theme().radius.md, bg_color);
+        ui.painter().rect_stroke(
+            dropdown_rect,
+            ui.active_theme().radius.md,
+            Stroke::new(DESIGN_TOKENS.stroke.hairline, border_color),
+            StrokeKind::Outside,
+        );
+
+        let mut changed = false;
+        let mut new_options = self.options.clone();
+        let item_height = DESIGN_TOKENS.sizing.button_md;
+        let mut y = dropdown_rect.min.y + ui.active_theme().spacing.sm;
+
+        // Render each sync option as a checkbox row
+        let sync_items = [
+            ("Time Axis", new_options.sync_time_axis, 0),
+            ("Crosshair", new_options.sync_crosshair, 1),
+            ("Drawings", new_options.sync_drawings, 2),
+            ("Symbol", new_options.sync_symbol, 3),
+            ("Timeframe", new_options.sync_timeframe, 4),
+        ];
+
+        for (label, enabled, idx) in sync_items {
+            let item_rect = Rect::from_min_size(
+                Pos2::new(dropdown_rect.min.x + ui.active_theme().spacing.sm, y),
+                Vec2::new(
+                    dropdown_rect.width() - ui.active_theme().spacing.md * 2.0,
+                    item_height,
+                ),
+            );
+
+            let item_response = ui.allocate_rect(item_rect, Sense::click());
+            let translated_label = l10n::text(ui.ctx(), label);
+            item_response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::Role::CheckBox,
+                    item_response.enabled(),
+                    enabled,
+                    &translated_label,
+                )
+            });
+            crate::styles::focus::draw_focus_ring(ui, &item_response, ui.active_theme().radius.sm);
+
+            // Highlight on hover
+            if item_response.hovered() {
+                ui.painter()
+                    .rect_filled(item_rect, ui.active_theme().radius.sm, hover_color);
+            }
+
+            // Checkbox
+            let checkbox_size = 14.0;
+            let checkbox_rect = Rect::from_min_size(
+                Pos2::new(
+                    item_rect.min.x + ui.active_theme().spacing.sm,
+                    item_rect.center().y - checkbox_size / 2.0,
+                ),
+                Vec2::splat(checkbox_size),
+            );
+
+            if enabled {
+                ui.painter().rect_filled(checkbox_rect, 2.0, accent_color);
+                // Checkmark
+                ui.painter().text(
+                    checkbox_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    l10n::text(ui.ctx(), "\u{2713}"),
+                    egui::FontId::proportional(checkbox_size * 0.8),
+                    check_color,
+                );
+            } else {
+                ui.painter().rect_stroke(
+                    checkbox_rect,
+                    2.0,
+                    Stroke::new(1.0_f32, border_color),
+                    StrokeKind::Inside,
+                );
+            }
+
+            // Label
+            ui.painter().text(
+                Pos2::new(
+                    item_rect.min.x
+                        + ui.active_theme().spacing.sm
+                        + checkbox_size
+                        + ui.active_theme().spacing.sm,
+                    item_rect.center().y,
+                ),
+                egui::Align2::LEFT_CENTER,
+                l10n::text(ui.ctx(), label),
+                egui::FontId::proportional(ui.active_theme().text.small),
+                text_color,
+            );
+
+            if item_response.clicked() {
+                // Toggle the appropriate option
+                match idx {
+                    0 => new_options.sync_time_axis = !enabled,
+                    1 => new_options.sync_crosshair = !enabled,
+                    2 => new_options.sync_drawings = !enabled,
+                    3 => new_options.sync_symbol = !enabled,
+                    4 => new_options.sync_timeframe = !enabled,
+                    _ => {}
+                }
+                changed = true;
+            }
+
+            y += item_height;
+        }
+
+        if changed { Some(new_options) } else { None }
+    }
+}

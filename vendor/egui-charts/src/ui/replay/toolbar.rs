@@ -1,0 +1,381 @@
+//! Replay toolbar UI
+//!
+//! Provide playback controls for market replay functionality including
+//! play/pause/stop buttons, speed selector, progress bar, and time display.
+
+use super::model::{
+    PlaybackSpeed, ReplayCommand, ReplayProgress, ToolbarReplayState as ReplayState,
+};
+use crate::icons::icons;
+use crate::localization as l10n;
+use crate::theme::ThemeExt;
+use crate::tokens::DESIGN_TOKENS;
+use crate::ui_kit::buttons::{ButtonSize, IconButton};
+use crate::ui_kit::ext::UiExt;
+use egui::{Response, Ui, Vec2, Widget};
+use std::sync::mpsc::Sender;
+
+/// Replay toolbar configuration
+#[derive(Debug, Clone)]
+pub struct ReplayToolbarConfig {
+    /// Show speed selector
+    pub show_speed_selector: bool,
+    /// Show progress bar
+    pub show_progress: bool,
+    /// Show time display
+    pub show_time: bool,
+    /// Compact mode (icons only)
+    pub compact: bool,
+}
+
+impl Default for ReplayToolbarConfig {
+    fn default() -> Self {
+        Self {
+            show_speed_selector: true,
+            show_progress: true,
+            show_time: true,
+            compact: false,
+        }
+    }
+}
+
+/// Replay toolbar state
+#[derive(Debug, Clone, Default)]
+pub struct ReplayToolbarState {
+    /// Current replay state
+    pub replay_state: ReplayState,
+    /// Current speed
+    pub speed: PlaybackSpeed,
+    /// Current progress (if available)
+    pub progress: Option<ReplayProgress>,
+}
+
+impl ReplayToolbarState {
+    /// Sync toolbar replay state from external values.
+    ///
+    /// `active` / `playing` map to the toolbar-level replay state enum,
+    /// and `speed_multiplier` is converted to the closest `PlaybackSpeed`.
+    pub fn sync_from(&mut self, active: bool, playing: bool, speed_multiplier: f32) {
+        if active {
+            if playing {
+                self.replay_state = ReplayState::Playing;
+            } else {
+                self.replay_state = ReplayState::Paused;
+            }
+        } else {
+            self.replay_state = ReplayState::Stopped;
+        }
+
+        self.speed = match speed_multiplier {
+            s if s <= 1.0 => PlaybackSpeed::RealTime,
+            s if s <= 4.0 => PlaybackSpeed::Fast,
+            s if s <= 100.0 => PlaybackSpeed::VeryFast,
+            _ => PlaybackSpeed::UltraFast,
+        };
+    }
+}
+
+/// Action emitted by the replay toolbar
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ReplayToolbarAction {
+    /// Play was clicked
+    Play,
+    /// Pause was clicked
+    Pause,
+    /// Stop was clicked
+    Stop,
+    /// Speed was changed
+    SetSpeed(PlaybackSpeed),
+    /// Step forward
+    StepForward,
+    /// Step backward
+    StepBackward,
+    /// Open replay settings dialog
+    OpenSettings,
+}
+
+/// Replay toolbar widget
+pub struct ReplayToolbar<'a> {
+    state: &'a ReplayToolbarState,
+    config: ReplayToolbarConfig,
+    command_sender: Option<&'a Sender<ReplayCommand>>,
+}
+
+impl<'a> ReplayToolbar<'a> {
+    /// Create a new replay toolbar
+    pub fn new(state: &'a ReplayToolbarState) -> Self {
+        Self {
+            state,
+            config: ReplayToolbarConfig::default(),
+            command_sender: None,
+        }
+    }
+
+    /// Set configuration
+    pub fn with_config(mut self, config: ReplayToolbarConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Set command sender for direct control
+    pub fn with_command_sender(mut self, sender: &'a Sender<ReplayCommand>) -> Self {
+        self.command_sender = Some(sender);
+        self
+    }
+
+    /// Enable compact mode
+    pub fn compact(mut self) -> Self {
+        self.config.compact = true;
+        self
+    }
+
+    /// Show the toolbar and return any action
+    pub fn show(&self, ui: &mut Ui) -> Option<ReplayToolbarAction> {
+        let action = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = ui.active_theme().spacing.sm;
+
+                let mut action = None;
+
+                // Play/Pause button
+                action = self.show_play_pause_button(ui).or(action);
+
+                // Stop button
+                action = self.show_stop_button(ui).or(action);
+
+                ui.space_sm();
+
+                // Step buttons
+                action = self.show_step_buttons(ui).or(action);
+
+                ui.space_md();
+
+                // Speed selector
+                if self.config.show_speed_selector {
+                    action = self.show_speed_selector(ui).or(action);
+                }
+
+                ui.space_md();
+
+                // Progress bar
+                if self.config.show_progress {
+                    self.show_progress_bar(ui);
+                }
+
+                // Time display
+                if self.config.show_time {
+                    self.show_time_display(ui);
+                }
+
+                // Settings button
+                if IconButton::new(&icons::SETTINGS)
+                    .size(self.button_size())
+                    .tooltip("Settings")
+                    .show(ui)
+                    .clicked()
+                {
+                    action = Some(ReplayToolbarAction::OpenSettings);
+                }
+
+                action
+            })
+            .inner;
+
+        // Send command if we have a sender
+        if let (Some(sender), Some(act)) = (&self.command_sender, &action) {
+            let cmd = match act {
+                ReplayToolbarAction::Play => Some(ReplayCommand::Resume),
+                ReplayToolbarAction::Pause => Some(ReplayCommand::Pause),
+                ReplayToolbarAction::Stop => Some(ReplayCommand::Stop),
+                ReplayToolbarAction::SetSpeed(s) => Some(ReplayCommand::SetSpeed(*s)),
+                ReplayToolbarAction::StepForward => Some(ReplayCommand::StepForward),
+                ReplayToolbarAction::StepBackward => Some(ReplayCommand::StepBackward),
+                ReplayToolbarAction::OpenSettings => None,
+            };
+
+            if let Some(cmd) = cmd {
+                let _ = sender.send(cmd);
+            }
+        }
+
+        action
+    }
+
+    fn button_size(&self) -> ButtonSize {
+        if self.config.compact {
+            ButtonSize::SM
+        } else {
+            ButtonSize::MD
+        }
+    }
+
+    fn show_play_pause_button(&self, ui: &mut Ui) -> Option<ReplayToolbarAction> {
+        let (icon, tooltip, action) = match self.state.replay_state {
+            ReplayState::Playing => (&icons::MEDIA_PAUSE, "Pause", ReplayToolbarAction::Pause),
+            ReplayState::Paused | ReplayState::Stopped | ReplayState::Finished => {
+                (&icons::MEDIA_PLAY, "Play", ReplayToolbarAction::Play)
+            }
+            ReplayState::Buffering => (
+                &icons::UI_BUFFERING,
+                "Buffering…",
+                ReplayToolbarAction::Pause,
+            ),
+            ReplayState::Error => (&icons::STATUS_ERROR, "Error", ReplayToolbarAction::Stop),
+        };
+
+        let response = IconButton::new(icon)
+            .size(self.button_size())
+            .tooltip(tooltip)
+            .show(ui);
+
+        if response.clicked() {
+            Some(action)
+        } else {
+            None
+        }
+    }
+
+    fn show_stop_button(&self, ui: &mut Ui) -> Option<ReplayToolbarAction> {
+        let response = IconButton::new(&icons::MEDIA_STOP)
+            .size(self.button_size())
+            .tooltip("Stop")
+            .enabled(self.state.replay_state.is_active())
+            .show(ui);
+
+        if response.clicked() {
+            Some(ReplayToolbarAction::Stop)
+        } else {
+            None
+        }
+    }
+
+    fn show_step_buttons(&self, ui: &mut Ui) -> Option<ReplayToolbarAction> {
+        let can_step =
+            self.state.replay_state == ReplayState::Paused || self.state.replay_state.can_start();
+
+        let mut action = None;
+
+        if IconButton::new(&icons::UI_ARROW_BACK)
+            .size(self.button_size())
+            .tooltip("Step backward")
+            .enabled(can_step)
+            .show(ui)
+            .clicked()
+        {
+            action = Some(ReplayToolbarAction::StepBackward);
+        }
+
+        if IconButton::new(&icons::UI_ARROW_FORWARD)
+            .size(self.button_size())
+            .tooltip("Step forward")
+            .enabled(can_step)
+            .show(ui)
+            .clicked()
+        {
+            action = Some(ReplayToolbarAction::StepForward);
+        }
+
+        action
+    }
+
+    fn show_speed_selector(&self, ui: &mut Ui) -> Option<ReplayToolbarAction> {
+        let mut action = None;
+        let current = self.state.speed;
+
+        egui::ComboBox::from_id_salt("replay_speed")
+            .selected_text(l10n::text(ui.ctx(), current.display_name()))
+            .width(DESIGN_TOKENS.sizing.replay.speed_dropdown_width)
+            .show_ui(ui, |ui| {
+                for speed in [
+                    PlaybackSpeed::RealTime,
+                    PlaybackSpeed::Fast,
+                    PlaybackSpeed::VeryFast,
+                    PlaybackSpeed::UltraFast,
+                ] {
+                    if ui
+                        .selectable_value(
+                            &mut self.state.speed.clone(),
+                            speed,
+                            l10n::text(ui.ctx(), speed.display_name()),
+                        )
+                        .clicked()
+                        && speed != current
+                    {
+                        action = Some(ReplayToolbarAction::SetSpeed(speed));
+                    }
+                }
+            });
+
+        action
+    }
+
+    fn show_progress_bar(&self, ui: &mut Ui) {
+        if let Some(ref progress) = self.state.progress {
+            let pct = progress.progress_pct() as f32;
+            let theme = ui.active_theme();
+
+            // Progress bar
+            let desired_size = Vec2::new(
+                DESIGN_TOKENS.sizing.replay.progress_bar_width / 2.0,
+                theme.spacing.sm,
+            );
+            let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+            let translated_label = l10n::text(ui.ctx(), "Replay progress");
+            response.widget_info(|| {
+                let mut info = egui::WidgetInfo::labeled(
+                    egui::Role::ProgressIndicator,
+                    response.enabled(),
+                    &translated_label,
+                );
+                info.value = Some(f64::from(pct) * 100.0);
+                info
+            });
+
+            if ui.is_rect_visible(rect) {
+                let painter = ui.painter();
+                let (bg, fg) = (theme.chart.bg, theme.ui.accent);
+
+                // Background
+                painter.rect_filled(rect, ui.active_theme().radius.xs, bg);
+
+                // Progress fill
+                let fill_width = rect.width() * pct;
+                let fill_rect =
+                    egui::Rect::from_min_size(rect.min, Vec2::new(fill_width, rect.height()));
+                painter.rect_filled(fill_rect, ui.active_theme().radius.xs, fg);
+            }
+
+            // Beside the bar, never over the fill.
+            ui.label(
+                egui::RichText::new(format!("{:.0}%", pct * 100.0))
+                    .size(theme.text.small)
+                    .color(theme.ui.text_secondary),
+            );
+        }
+    }
+
+    fn show_time_display(&self, ui: &mut Ui) {
+        if let Some(ref progress) = self.state.progress {
+            let time_str = progress.current_time.format("%H:%M:%S").to_string();
+            ui.label(
+                egui::RichText::new(l10n::text(ui.ctx(), time_str))
+                    .monospace()
+                    .small(),
+            );
+
+            // Bars played
+            let bars_str = format!("{}/{}", progress.bars_played, progress.total_bars);
+            ui.hint_label(bars_str);
+        }
+    }
+}
+
+impl Widget for ReplayToolbar<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        ui.horizontal(|ui| {
+            self.show(ui);
+        })
+        .response
+    }
+}

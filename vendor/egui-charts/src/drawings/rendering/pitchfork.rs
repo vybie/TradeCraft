@@ -1,0 +1,638 @@
+//! Pitchfork tool rendering implementations
+//!
+//! Includes: standard pitchfork, modified Schiff, inside pitchfork, and pitchfan.
+
+use crate::drawings::domain::{Drawing, DrawingToolType, PitchforkConfig};
+use crate::drawings::validation::MAX_PITCHFORK_LEVEL;
+use crate::model::LineStyle;
+use crate::styles::stroke;
+use crate::tokens::DESIGN_TOKENS;
+use egui::{Color32, Pos2, Rect, Stroke};
+
+impl Drawing {
+    /// Standard and Schiff pitchforks and the pitchfan
+    pub(crate) fn render_pitchfork(&self, painter: &egui::Painter, chart_rect: Rect) {
+        let color = Color32::from_rgba_unmultiplied(
+            self.color[0],
+            self.color[1],
+            self.color[2],
+            self.color[3],
+        );
+
+        // Need at least 3 points for pitchfork
+        if self.points.len() < 3 {
+            // Draw points we have so far
+            for (i, &point) in self.points.iter().enumerate() {
+                painter.circle_filled(point, DESIGN_TOKENS.rounding.sm, color);
+                if i > 0 {
+                    painter.line_segment(
+                        [self.points[i - 1], point],
+                        Stroke::new(stroke::HAIRLINE, color),
+                    );
+                }
+            }
+            return;
+        }
+
+        self.draw_fork(painter, chart_rect);
+    }
+
+    pub(crate) fn render_modified_schiff_pitchfork(
+        &self,
+        painter: &egui::Painter,
+        chart_rect: Rect,
+    ) {
+        // Modified Schiff moves the anchor point to midway between p0 and p1
+        if self.points.len() < 3 {
+            for &p in &self.points {
+                painter.circle_filled(
+                    p,
+                    DESIGN_TOKENS.rounding.sm,
+                    Color32::from_rgba_unmultiplied(
+                        self.color[0],
+                        self.color[1],
+                        self.color[2],
+                        self.color[3],
+                    ),
+                );
+            }
+            return;
+        }
+
+        self.draw_fork(painter, chart_rect);
+    }
+
+    pub(crate) fn render_inside_pitchfork(&self, painter: &egui::Painter, chart_rect: Rect) {
+        // Inside starts its tines at the second and third anchors.
+        if self.points.len() < 3 {
+            for &p in &self.points {
+                painter.circle_filled(
+                    p,
+                    DESIGN_TOKENS.rounding.sm,
+                    Color32::from_rgba_unmultiplied(
+                        self.color[0],
+                        self.color[1],
+                        self.color[2],
+                        self.color[3],
+                    ),
+                );
+            }
+            return;
+        }
+
+        self.draw_fork(painter, chart_rect);
+    }
+
+    /// The pitchfork's median and parallels towards the pane edge in their
+    /// direction, then the construction legs. `None`
+    /// below three anchors.
+    fn pitchfork_base_lines(&self, rect: Rect) -> Option<Vec<[Pos2; 2]>> {
+        let &[p0, p1, p2, ..] = self.points.as_slice() else {
+            return None;
+        };
+        let mid = |a: Pos2, b: Pos2| a + (b - a) / 2.0;
+        let (origin, through, upper, lower, legs) = match self.tool_type {
+            DrawingToolType::Pitchfork | DrawingToolType::SchiffPitchfork => {
+                let schiff = self.tool_type == DrawingToolType::SchiffPitchfork;
+                let (origin, through) = median_line(p0, p1, p2, schiff);
+                let legs = if schiff {
+                    vec![[p0, p1], [p1, p2]]
+                } else {
+                    vec![[p1, p2]]
+                };
+                (origin, through, p1, p2, legs)
+            }
+            DrawingToolType::ModifiedSchiffPitchfork => {
+                (mid(p0, p1), mid(p1, p2), p1, p2, vec![[p0, p1], [p1, p2]])
+            }
+            DrawingToolType::InsidePitchfork => {
+                // All three rays are parallel to the first leg's midpoint to the third anchor.
+                let origin = mid(p1, p2);
+                (
+                    origin,
+                    origin + (p2 - mid(p0, p1)),
+                    p1,
+                    p2,
+                    vec![[p0, p1], [p1, p2], [mid(p0, p1), p2]],
+                )
+            }
+            // The pitchfan's rays all start at the first anchor; see `level_lines`.
+            DrawingToolType::Pitchfan => (p0, mid(p1, p2), p1, p2, vec![[p1, p2]]),
+            _ => return None,
+        };
+        let mut lines = fork_lines(origin, through, upper, lower, rect).to_vec();
+        lines.extend(legs);
+        Some(lines)
+    }
+
+    /// All visible level lines, followed by the construction legs, shared with selection.
+    pub(super) fn pitchfork_lines(&self, rect: Rect) -> Option<Vec<[Pos2; 2]>> {
+        let base = self.pitchfork_base_lines(rect)?;
+        let config = self
+            .pitchfork
+            .clone()
+            .unwrap_or_else(PitchforkConfig::legacy);
+        let mut lines = Vec::new();
+        for level in config
+            .levels
+            .iter()
+            .filter(|l| l.visible && (0.0..=MAX_PITCHFORK_LEVEL).contains(&l.value))
+        {
+            lines.extend(self.level_lines(&base, level.value, rect));
+        }
+        lines.extend_from_slice(&base[3..]);
+        Some(lines)
+    }
+
+    /// Bands join adjacent visible levels, ignoring the disabled spare levels.
+    pub(super) fn pitchfork_bands(&self, rect: Rect) -> Vec<Vec<Pos2>> {
+        let Some(base) = self.pitchfork_base_lines(rect) else {
+            return Vec::new();
+        };
+        let mut config = self
+            .pitchfork
+            .clone()
+            .unwrap_or_else(PitchforkConfig::legacy);
+        if !config.show_background {
+            return Vec::new();
+        }
+        config
+            .levels
+            .retain(|l| l.visible && (0.0..=MAX_PITCHFORK_LEVEL).contains(&l.value));
+        config.levels.sort_by(|a, b| a.value.total_cmp(&b.value));
+        let mut bands = Vec::new();
+        for pair in config.levels.windows(2) {
+            let inner = self.level_lines(&base, pair[0].value, rect);
+            let outer = self.level_lines(&base, pair[1].value, rect);
+            for (side, outside) in outer.iter().enumerate() {
+                let inside = inner[side.min(inner.len() - 1)];
+                bands.push(if self.tool_type == DrawingToolType::Pitchfan {
+                    fan_band(inside[0], inside[1], outside[1], rect)
+                } else {
+                    vec![inside[0], inside[1], outside[1], outside[0]]
+                });
+            }
+        }
+        bands
+    }
+
+    /// Level `value`'s lines. A fork interpolates each tine's start from the median origin and
+    /// runs parallel to the median to the pane edge, and back too when it extends back.
+    /// The pitchfan casts rays from the first anchor through points `value` half-legs from the
+    /// midpoint of the second and third anchors.
+    fn level_lines(&self, base: &[[Pos2; 2]], value: f32, rect: Rect) -> Vec<[Pos2; 2]> {
+        let origin = base[0][0];
+        let direction = base[0][1] - origin;
+        let fan = self.tool_type == DrawingToolType::Pitchfan;
+        let back = !fan
+            && if direction.x < 0.0 {
+                self.extend_right
+            } else {
+                self.extend_left
+            };
+        let mid = base[1][0].lerp(base[2][0], 0.5);
+        let tines = if value == 0.0 {
+            &base[..1]
+        } else {
+            &base[1..3]
+        };
+        tines
+            .iter()
+            .map(|line| {
+                if fan {
+                    let through = mid + (line[0] - mid) * value;
+                    return [origin, super::lines::ray_end(origin, through, rect)];
+                }
+                let start = origin + (line[0] - origin) * value;
+                let end = super::lines::ray_end(start, start + direction, rect);
+                if back {
+                    [super::lines::ray_end(start, start - direction, rect), end]
+                } else {
+                    [start, end]
+                }
+            })
+            .collect()
+    }
+
+    /// Paints the band fill, the levels and the construction legs.
+    fn draw_fork(&self, painter: &egui::Painter, rect: Rect) {
+        let Some(base) = self.pitchfork_base_lines(rect) else {
+            return;
+        };
+        let mut config = self
+            .pitchfork
+            .clone()
+            .unwrap_or_else(PitchforkConfig::legacy);
+        config
+            .levels
+            .retain(|l| (0.0..=MAX_PITCHFORK_LEVEL).contains(&l.value));
+        config.levels.sort_by(|a, b| a.value.total_cmp(&b.value));
+        let visible: Vec<_> = config.levels.iter().filter(|level| level.visible).collect();
+        let mut bands = self.pitchfork_bands(rect).into_iter();
+        for pair in visible.windows(2) {
+            let color = if self.pitchfork.is_some() {
+                pair[1].color
+            } else {
+                self.color
+            };
+            let fill = Color32::from_rgba_unmultiplied(
+                color[0],
+                color[1],
+                color[2],
+                config.background_opacity,
+            );
+            for band in bands
+                .by_ref()
+                .take(self.level_lines(&base, pair[1].value, rect).len())
+            {
+                painter.add(egui::Shape::convex_polygon(band, fill, Stroke::NONE));
+            }
+        }
+        let stroke_line = |[a, b]: [Pos2; 2], width: f32, rgba: [u8; 4], style: LineStyle| {
+            if !(width > 0.0 && width <= crate::drawings::validation::MAX_STROKE_WIDTH) {
+                return;
+            }
+            let stroke = Stroke::new(
+                width,
+                Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]),
+            );
+            if let Some((dash, gap)) = style.dash_pattern() {
+                super::utils::draw_dashed_line(painter, a, b, stroke, dash, gap);
+            } else {
+                painter.line_segment([a, b], stroke);
+            }
+        };
+        for level in config
+            .levels
+            .iter()
+            .filter(|l| l.visible && (0.0..=MAX_PITCHFORK_LEVEL).contains(&l.value))
+        {
+            let rgba = if self.pitchfork.is_none() {
+                self.color
+            } else {
+                level.color
+            };
+            let width = if self.pitchfork.is_none() && level.value == 1.0 {
+                stroke::HAIRLINE
+            } else {
+                level.width.unwrap_or(self.stroke_width)
+            };
+            for line in self.level_lines(&base, level.value, rect) {
+                stroke_line(line, width, rgba, level.line_style);
+            }
+        }
+        // Legs take the median's colour, width and style, also when the median is hidden.
+        let (rgba, width, style) = match config.levels.iter().find(|l| l.value == 0.0) {
+            Some(median) if self.pitchfork.is_some() => (
+                median.color,
+                median.width.unwrap_or(self.stroke_width),
+                median.line_style,
+            ),
+            _ => (self.color, self.stroke_width, LineStyle::Solid),
+        };
+        for &leg in &base[3..] {
+            stroke_line(leg, width, rgba, style);
+        }
+    }
+}
+
+/// A pitchfork's median from `origin` through `through`, extended towards the
+/// pane edge, and its parallels from `p1` and `p2`.
+fn fork_lines(origin: Pos2, through: Pos2, p1: Pos2, p2: Pos2, rect: Rect) -> [[Pos2; 2]; 3] {
+    let direction = through - origin;
+    [origin, p1, p2].map(|start| [start, super::lines::ray_end(start, start + direction, rect)])
+}
+
+/// Origin of the median line and the point it passes through, the midpoint of the
+/// second and third anchors. The Schiff variant keeps the first anchor's time and
+/// moves its price halfway to the second anchor.
+fn median_line(p0: Pos2, p1: Pos2, p2: Pos2, is_schiff: bool) -> (Pos2, Pos2) {
+    let origin = if is_schiff {
+        Pos2::new(p0.x, (p0.y + p1.y) / 2.0)
+    } else {
+        p0
+    };
+    (origin, p1.lerp(p2, 0.5))
+}
+
+/// Covers the band between two rays throughout the pane by taking both rays out to the
+/// farthest corner's distance, then meeting their perpendiculars there. Opposite rays are empty.
+fn fan_band(apex: Pos2, a: Pos2, b: Pos2, rect: Rect) -> Vec<Pos2> {
+    let reach = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.left_bottom(),
+        rect.right_bottom(),
+    ]
+    .into_iter()
+    .map(|corner| corner.distance(apex))
+    .fold(0.0, f32::max);
+    let (da, db) = ((a - apex).normalized(), (b - apex).normalized());
+    let cos = da.dot(db);
+    let tip = if cos > -1.0 + 1e-6 {
+        apex + (da + db) * (reach / (1.0 + cos))
+    } else {
+        apex
+    };
+    vec![apex, apex + da * reach, tip, apex + db * reach]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host colour reaches the median and legs, while independent levels and saved defaults stay.
+    #[test]
+    fn host_default_colour_reaches_new_forks() {
+        use crate::drawings::{DrawingManager, DrawingTemplate};
+        let host = [10, 200, 30, 255];
+        let rect = Rect::from_min_max(Pos2::new(-100.0, -1000.0), Pos2::new(100.0, 1000.0));
+        for tool in [
+            DrawingToolType::Pitchfork,
+            DrawingToolType::SchiffPitchfork,
+            DrawingToolType::ModifiedSchiffPitchfork,
+            DrawingToolType::InsidePitchfork,
+            DrawingToolType::Pitchfan,
+        ] {
+            for (host_color, saved) in [(Some(host), false), (None, false), (Some(host), true)] {
+                let mut manager = DrawingManager::new();
+                manager.options.default_color = host_color;
+                let mut defaults = Drawing::new(0, tool);
+                if saved {
+                    defaults.color = [90, 80, 70, 255];
+                    defaults.pitchfork.as_mut().unwrap().levels[0].color = [60, 50, 40, 180];
+                    manager
+                        .tool_defaults
+                        .insert(tool, DrawingTemplate::from_drawing(&defaults));
+                }
+                let expected = if saved {
+                    defaults.pitchfork.as_ref().unwrap().levels[0].color
+                } else {
+                    host_color.unwrap_or(defaults.color)
+                };
+                manager.start_drawing_with_coords(tool, Pos2::ZERO, |x| x, f64::from);
+                for point in [Pos2::new(10.0, 100.0), Pos2::new(20.0, -50.0)] {
+                    manager.add_point_with_coords(point, |x| x, f64::from);
+                }
+                let drawing = &manager.drawings[0];
+                assert!(drawing.completed);
+                assert_eq!(
+                    drawing.pitchfork.as_ref().unwrap().levels[1..],
+                    defaults.pitchfork.as_ref().unwrap().levels[1..],
+                    "{tool:?}: independent levels"
+                );
+                let output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+                    drawing.draw_fork(ui.painter(), rect);
+                });
+                let lines: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::LineSegment { points, stroke } => Some((*points, *stroke)),
+                        _ => None,
+                    })
+                    .collect();
+                output.drop_without_applying_deltas();
+                let color = Color32::from_rgba_unmultiplied(
+                    expected[0],
+                    expected[1],
+                    expected[2],
+                    expected[3],
+                );
+                assert!(
+                    lines.iter().any(|(_, stroke)| stroke.color == color),
+                    "{tool:?}: median"
+                );
+                for leg in &drawing.pitchfork_base_lines(rect).unwrap()[3..] {
+                    assert!(
+                        lines
+                            .iter()
+                            .any(|(points, stroke)| points == leg && stroke.color == color),
+                        "{tool:?}: leg"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Reference: anchors (0, 0), (10, 100), (20, -50). Both medians run through
+    /// (15, 25), the midpoint of the second and third anchors. The standard median
+    /// starts at the first anchor (slope 5/3); the Schiff median starts at (0, 50),
+    /// halfway up the first leg (slope -5/3).
+    #[test]
+    fn median_line_matches_construction() {
+        let anchors = [
+            Pos2::new(0.0, 0.0),
+            Pos2::new(10.0, 100.0),
+            Pos2::new(20.0, -50.0),
+        ];
+        for (is_schiff, origin, through) in [
+            (false, Pos2::new(0.0, 0.0), Pos2::new(15.0, 25.0)),
+            (true, Pos2::new(0.0, 50.0), Pos2::new(15.0, 25.0)),
+        ] {
+            let got = median_line(anchors[0], anchors[1], anchors[2], is_schiff);
+            assert!(
+                got.0.distance(origin) < 1e-4 && got.1.distance(through) < 1e-4,
+                "schiff {is_schiff}: got {got:?}, want ({origin:?}, {through:?})"
+            );
+        }
+        // Inside: median from (B+C)/2=(15,25), tines from B and C, parallel to
+        // (A+B)/2=(5,50) -> C, slope -20/3.
+        for (tool, origin, slope) in [
+            (DrawingToolType::Pitchfork, Pos2::new(0.0, 0.0), 5.0 / 3.0),
+            (
+                DrawingToolType::SchiffPitchfork,
+                Pos2::new(0.0, 50.0),
+                -5.0 / 3.0,
+            ),
+            (
+                DrawingToolType::ModifiedSchiffPitchfork,
+                Pos2::new(5.0, 50.0),
+                -2.5,
+            ),
+            (
+                DrawingToolType::InsidePitchfork,
+                Pos2::new(15.0, 25.0),
+                -20.0 / 3.0,
+            ),
+        ] {
+            let mut drawing = Drawing::new(0, tool);
+            drawing.points = anchors.to_vec();
+            drawing.pitchfork = None;
+            let rect = Rect::from_min_max(Pos2::new(-100.0, -1000.0), Pos2::new(100.0, 1000.0));
+            let lines = drawing.pitchfork_base_lines(rect).unwrap();
+            for (line, start) in lines.iter().zip([origin, anchors[1], anchors[2]]) {
+                assert!(line[0].distance(start) < 1e-4, "{tool:?}: {line:?}");
+            }
+            drawing.extend_right = true;
+            assert!(drawing.pitchfork_lines(rect).unwrap()[0][0].distance(origin) < 1e-4);
+            drawing.extend_left = true;
+            let [a, b] = drawing.pitchfork_lines(rect).unwrap()[0];
+            assert!((a.x + 100.0).abs() < 1e-4, "{tool:?}: {a:?}");
+            assert!(((b.y - a.y) / (b.x - a.x) - slope).abs() < 1e-4);
+            for [a, b] in &lines[..3] {
+                assert!(
+                    ((b.y - a.y) / (b.x - a.x) - slope).abs() < 1e-4,
+                    "{tool:?}: {a:?} {b:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn pitchfork_levels_are_mirrored_filled_saved_and_selectable() {
+        let rect = Rect::from_min_max(Pos2::new(-100.0, -2000.0), Pos2::new(400.0, 2000.0));
+        // At x=40: median, half-distance lines, tines, one-and-a-half-distance lines.
+        let [a, b, c] = [Pos2::ZERO, Pos2::new(10.0, 100.0), Pos2::new(20.0, -50.0)];
+        for (tool, ys, legs) in [
+            (
+                DrawingToolType::Pitchfork,
+                [66.6667, 108.3333, 25.0, 150.0, -16.6667, 191.6667, -58.3333],
+                vec![[b, c]],
+            ),
+            (
+                DrawingToolType::SchiffPitchfork,
+                [-16.6667, 16.6667, -50.0, 50.0, -83.3333, 83.3333, -116.6667],
+                vec![[a, b], [b, c]],
+            ),
+            (
+                DrawingToolType::ModifiedSchiffPitchfork,
+                [-37.5, -6.25, -68.75, 25.0, -100.0, 56.25, -131.25],
+                vec![[a, b], [b, c]],
+            ),
+            (
+                DrawingToolType::InsidePitchfork,
+                [
+                    -141.6667, -120.8333, -162.5, -100.0, -183.3333, -79.1667, -204.1667,
+                ],
+                vec![[a, b], [b, c], [Pos2::new(5.0, 50.0), c]],
+            ),
+            (
+                DrawingToolType::Pitchfan,
+                [66.6667, 200.0, -28.5714, 400.0, -100.0, 733.3333, -155.5556],
+                vec![[b, c]],
+            ),
+        ] {
+            let mut drawing = Drawing::new(12, tool);
+            drawing.points = vec![a, b, c];
+            assert_eq!(
+                drawing.outline(rect).unwrap().areas.len(),
+                4,
+                "{tool:?}: default bands"
+            );
+            // A fork saved without a config.
+            drawing.pitchfork = None;
+            drawing.points = vec![Pos2::ZERO, Pos2::new(10.0, 100.0), Pos2::new(20.0, -50.0)];
+            let lines = drawing.pitchfork_lines(rect).unwrap();
+            if tool == DrawingToolType::Pitchfan {
+                assert!(lines[..7].iter().all(|line| line[0] == Pos2::ZERO));
+            }
+            assert_eq!(lines[7..], legs, "{tool:?}: construction legs");
+            for ([a, b], want) in lines.iter().take(7).zip(ys) {
+                let y = a.y + (40.0 - a.x) * (b.y - a.y) / (b.x - a.x);
+                assert!((y - want).abs() < 1e-3, "{tool:?}: {y} != {want}");
+            }
+            let output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+                drawing.draw_fork(ui.painter(), rect)
+            });
+            assert!(output.shapes.iter().any(|s| matches!(&s.shape,
+                egui::Shape::LineSegment { points, stroke }
+                    if *points == legs[0] && *stroke == Stroke::new(drawing.stroke_width, drawing.color32())
+            )), "{tool:?}: median stroke on legs");
+            let first_color = output.shapes.iter().find_map(|s| {
+                if let egui::Shape::LineSegment { stroke, .. } = &s.shape {
+                    Some(stroke.color)
+                } else {
+                    None
+                }
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(
+                first_color,
+                Some(drawing.color32()),
+                "default levels inherit the drawing colour"
+            );
+            let outline = drawing.outline(rect).unwrap();
+            assert_eq!(outline.areas.len(), 6);
+            let point = Pos2::new(40.0, ys[5]);
+            assert_eq!(
+                crate::drawings::services::DrawingInteraction::new().hit_test(
+                    point,
+                    &[drawing.clone()],
+                    "1m"
+                ),
+                Some(12)
+            );
+
+            // Inject custom settings through the saved form so old files and new fields both use serde.
+            let mut saved = serde_json::to_value(&drawing).unwrap();
+            let mut config = serde_json::json!({"levels":[
+                {"value":0.0,"visible":true,"color":[10,20,30,255],"line_style":"Dotted"},
+                {"value":0.5,"visible":false,"color":[10,20,30,255],"line_style":"Dashed"},
+                {"value":1.0,"visible":true,"color":[10,20,30,255],"line_style":"Solid"},
+                {"value":1.5,"visible":true,"color":[10,20,30,255],"line_style":"Solid"}
+            ],"show_background":true,"background_opacity":35});
+            saved["pitchfork"] = config.clone();
+            let mut restored: Drawing = serde_json::from_value(saved.clone()).unwrap();
+            for level in config["levels"].as_array_mut().unwrap() {
+                level["width"] = serde_json::Value::Null;
+            }
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap()["pitchfork"],
+                config
+            );
+            restored.points = drawing.points.clone();
+            assert_eq!(restored.outline(rect).unwrap().areas.len(), 4);
+            assert_eq!(
+                restored.pitchfork_lines(rect).unwrap().len(),
+                lines.len() - 2
+            );
+            // Missing widths inherit the drawing width; explicit widths survive saving and painting.
+            saved["pitchfork"]["levels"][2]["width"] = 6.0.into();
+            saved["pitchfork"]["levels"][3]["width"] = 3.0.into();
+            let mut wide: Drawing = serde_json::from_value(saved.clone()).unwrap();
+            wide.points = drawing.points.clone();
+            let median = &mut wide.pitchfork.as_mut().unwrap().levels[0];
+            median.visible = false;
+            median.color = [11, 22, 33, 255];
+            median.width = Some(7.0);
+            let mut output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+                wide.draw_fork(ui.painter(), rect)
+            });
+            output.textures_delta.clear();
+            assert!(
+                output.shapes.iter().any(|s| matches!(&s.shape,
+                    egui::Shape::LineSegment { stroke, .. }
+                        if *stroke == Stroke::new(7.0, Color32::from_rgb(11, 22, 33))
+                )),
+                "{tool:?}: hidden median style on legs"
+            );
+            for width in [3.0, 6.0] {
+                assert!(
+                    output.shapes.iter().any(|s| matches!(&s.shape,
+                    egui::Shape::LineSegment {stroke,..} if stroke.width==width)),
+                    "{tool:?}: level width {width}"
+                );
+            }
+            output.drop_without_applying_deltas();
+            saved["pitchfork"]["show_background"] = false.into();
+            let mut unfilled: Drawing = serde_json::from_value(saved.clone()).unwrap();
+            unfilled.points = drawing.points.clone();
+            assert!(unfilled.outline(rect).unwrap().areas.is_empty());
+            saved.as_object_mut().unwrap().remove("pitchfork");
+            let mut legacy: Drawing = serde_json::from_value(saved).unwrap();
+            legacy.points = drawing.points;
+            assert_eq!(legacy.pitchfork_lines(rect).unwrap(), lines);
+        }
+        // Rays leaving through different pane edges must fill the whole visible wedge.
+        let mut fan = Drawing::new(13, DrawingToolType::Pitchfan);
+        fan.points = vec![Pos2::ZERO, Pos2::new(10.0, -5.0), Pos2::new(-10.0, -5.0)];
+        assert_eq!(
+            crate::drawings::services::DrawingInteraction::new().hit_test(
+                Pos2::new(300.0, -1900.0),
+                &[fan],
+                "1m"
+            ),
+            Some(13)
+        );
+    }
+}

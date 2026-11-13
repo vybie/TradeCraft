@@ -1,0 +1,237 @@
+//! Least Squares Moving Average (LSMA) indicator.
+//!
+//! Also known as the *Linear Regression Line* or *Moving Linear Regression*,
+//! LSMA fits an ordinary least-squares line through the last `N` closing
+//! prices and reports the endpoint value. An optional `offset` parameter
+//! projects the line forward (or backward) by a specified number of bars.
+//!
+//! # Formula
+//!
+//! For each window of `period` prices, compute the best-fit line
+//! `y = m*x + b` and evaluate it at the last position (+offset).
+//!
+//! # Example
+//!
+//! ```rust
+//! # let bars: Vec<egui_charts::model::Bar> = (0..60).map(|i| { let p = 100.0 + (i as f64 * 0.3).sin() * 5.0; egui_charts::model::Bar::new(chrono::Utc::now(), p, p + 1.0, p - 1.0, p + 0.5, 1_000.0) }).collect();
+//! use egui_charts::studies::{LSMA, Indicator};
+//!
+//! let mut lsma = LSMA::new(25);
+//! lsma.calculate(&bars);
+//! ```
+
+use crate::model::Bar;
+use crate::studies::palette;
+use crate::studies::stepper::update_window;
+use crate::studies::{Indicator, IndicatorValue, IndicatorValues};
+use egui::Color32;
+
+/// Least Squares Moving Average (Linear Regression Line) indicator.
+///
+/// Fits a least-squares regression line to the most recent `period` prices
+/// and reports the end-point value. Overlay indicator.
+#[derive(Clone)]
+pub struct LSMA {
+    period: usize,
+    offset: i32, // Future projection offset (can be negative for past)
+    values: IndicatorValues,
+    color: Color32,
+    visible: bool,
+}
+
+impl LSMA {
+    /// Create a new LSMA indicator.
+    ///
+    /// # Arguments
+    /// * `period` -- Number of bars in the regression window (e.g. 25).
+    pub fn new(period: usize) -> Self {
+        Self {
+            period: period.max(1),
+            offset: 0,
+            values: IndicatorValues::new(),
+            color: palette::BLUE,
+            visible: true,
+        }
+    }
+
+    /// Set the forward (positive) or backward (negative) projection offset in bars.
+    pub fn with_offset(mut self, offset: i32) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Set a custom line colour (builder pattern).
+    pub fn with_color(mut self, color: Color32) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Compute the least-squares regression value for a price window,
+    /// evaluated at the last index plus `offset`.
+    fn linear_regression(prices: &[f64], offset: i32) -> f64 {
+        let n = prices.len() as f64;
+        if n == 0.0 {
+            return 0.0;
+        }
+
+        // Calculate sums for linear regression
+        // y = mx + b where x is the bar index
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_xx = 0.0;
+
+        for (i, price) in prices.iter().enumerate() {
+            let x = i as f64;
+            sum_x += x;
+            sum_y += price;
+            sum_xy += x * price;
+            sum_xx += x * x;
+        }
+
+        // Calculate slope (m) and intercept (b)
+        let denominator = n * sum_xx - sum_x * sum_x;
+        if denominator.abs() < 1e-10 {
+            return sum_y / n; // Return avg if no slope
+        }
+
+        let m = (n * sum_xy - sum_x * sum_y) / denominator;
+        let b = (sum_y - m * sum_x) / n;
+
+        // Calculate value at the last point + offset
+        let x_target = (prices.len() - 1) as f64 + offset as f64;
+        m * x_target + b
+    }
+}
+
+/// Construct with the conventional default parameters.
+impl Default for LSMA {
+    fn default() -> Self {
+        Self::new(25)
+    }
+}
+
+impl LSMA {
+    fn compute(&self, data: &[Bar]) -> IndicatorValues {
+        let mut values = IndicatorValues::new();
+
+        for i in 0..data.len() {
+            if i < self.period - 1 {
+                values.push(IndicatorValue::None);
+            } else {
+                let prices: Vec<f64> = data[i + 1 - self.period..=i]
+                    .iter()
+                    .map(|bar| bar.close)
+                    .collect();
+
+                let lsma = Self::linear_regression(&prices, self.offset);
+                values.push(IndicatorValue::Single(lsma));
+            }
+        }
+        values
+    }
+}
+
+impl Indicator for LSMA {
+    fn source(&self) -> Option<crate::studies::StudySource> {
+        Some(crate::studies::StudySource::Price(
+            crate::model::PriceSource::Close,
+        ))
+    }
+
+    crate::studies::inputs::study_inputs!(self;
+        period: length("Period", 1, usize::MAX),
+        offset: integer("Offset", i32::MIN, i32::MAX)
+    ; {});
+
+    fn name(&self) -> &str {
+        "LSMA"
+    }
+
+    fn desc(&self) -> &str {
+        "Least Squares Moving Avg - Linear regression line"
+    }
+
+    fn calculate(&mut self, data: &[Bar]) {
+        self.update(data, 0);
+    }
+
+    fn update(&mut self, data: &[Bar], from: usize) {
+        let mut values = std::mem::take(&mut self.values);
+        update_window(
+            &mut values,
+            data,
+            from,
+            |_data, from| from.saturating_sub(self.period - 1),
+            |data| self.compute(data),
+        );
+        self.values = values;
+    }
+
+    fn is_incremental(&self) -> bool {
+        true
+    }
+
+    fn values(&self) -> &IndicatorValues {
+        &self.values
+    }
+
+    fn colors(&self) -> Vec<Color32> {
+        vec![self.color]
+    }
+
+    fn set_colors(&mut self, colors: Vec<Color32>) {
+        if !colors.is_empty() {
+            self.color = colors[0];
+        }
+    }
+
+    fn is_overlay(&self) -> bool {
+        true
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    fn clone_box(&self) -> Box<dyn Indicator> {
+        Box::new(self.clone())
+    }
+
+    fn line_names(&self) -> Vec<String> {
+        if self.offset != 0 {
+            vec![format!("LSMA({}, {})", self.period, self.offset)]
+        } else {
+            vec![format!("LSMA({})", self.period)]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::studies::test_support::make_bar;
+
+    #[test]
+    fn regression_endpoint_and_offset_match_hand_values() {
+        for (closes, offset, expected) in [
+            ([100.0; 5], 0, 100.0),
+            ([100.0, 101.0, 102.0, 103.0, 104.0], 0, 104.0),
+            ([100.0, 101.0, 102.0, 103.0, 104.0], 1, 105.0),
+        ] {
+            let data: Vec<Bar> = closes.into_iter().map(make_bar).collect();
+            let mut lsma = LSMA::new(data.len()).with_offset(offset);
+            lsma.calculate(&data);
+            assert_eq!(lsma.values().len(), data.len());
+            for bar in 0..data.len() - 1 {
+                assert_eq!(lsma.values().value(0, bar), None, "warm-up bar {bar}");
+            }
+            let got = lsma.values().value(0, data.len() - 1).unwrap();
+            assert!((got - expected).abs() < 1e-9, "{closes:?}, offset {offset}");
+        }
+    }
+}
