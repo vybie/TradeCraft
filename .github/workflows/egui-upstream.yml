@@ -1,0 +1,45 @@
+name: Check egui-charts upstream
+
+on:
+  schedule:
+    - cron: '17 15 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for upstream commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(tr -d '[:space:]' < vendor/EGUI-CHARTS-UPSTREAM)
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid upstream revision'; exit 1; }
+          latest=$(gh api repos/userFRM/egui-charts/commits/main --jq .sha)
+          issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title,body --jq '.[] | select(.title == "egui-charts upstream update available" and ((.body // "") | contains("<!-- tradecraft-egui-upstream-check -->"))) | .number' | head -n 1)
+          if [[ "$base" == "$latest" ]]; then
+            echo "Upstream is current: $base"
+            if [[ -n "$issue" ]]; then
+              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --comment 'The tracked upstream revision is now current.'
+            fi
+            exit 0
+          fi
+          comparison=$(gh api "repos/userFRM/egui-charts/compare/$base...$latest")
+          status=$(jq -r .status <<< "$comparison")
+          ahead=$(jq -r .ahead_by <<< "$comparison")
+          behind=$(jq -r .behind_by <<< "$comparison")
+          compare_url="https://github.com/userFRM/egui-charts/compare/$base...$latest"
+          title='egui-charts upstream update available'
+          body=$(printf '<!-- tradecraft-egui-upstream-check -->\nTradeCraft tracks `%s`; upstream main is at `%s`.\n\nComparison: %s\n\nStatus: %s; upstream commits ahead: %s; commits behind: %s.\n\nReview and merge upstream changes while preserving TradeCraft integrations. Run tests, check licensing and rebuild both editions before updating the tracked revision. This check does not update code automatically.' "$base" "$latest" "$compare_url" "$status" "$ahead" "$behind")
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi

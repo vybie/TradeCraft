@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Updated the project description and documentation to describe TradeCraft as an alpha application.
+- Updated the vendored egui-charts terminal to upstream revision `c9a7f0b`, retaining TradeCraft's integration, and added a scheduled upstream update check.
+
 ## 0.2.0 — alpha
 
 Changes since the published 0.1.0 preview:
