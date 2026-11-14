@@ -102,7 +102,7 @@ impl StudyTemplate {
     /// `Chart::study_template_set` saves a chart's studies with the links between them.
     pub fn from_study(study: &dyn Indicator) -> Self {
         Self {
-            name: study.name().into(),
+            name: study.persistence_name(),
             inputs: study
                 .inputs()
                 .into_iter()

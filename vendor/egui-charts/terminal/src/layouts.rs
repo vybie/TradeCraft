@@ -10,6 +10,9 @@ use super::layout::Region;
 use super::{Action, Terminal};
 use egui_charts::config::KeyboardAction;
 use egui_charts::localization as l10n;
+use egui_charts::model::Quote;
+use egui_charts::scales::{CurrencyFormatter, PriceFormatter};
+use egui_charts::icons::icons;
 use egui_charts::services::UserSettings;
 use egui_charts::ui::Control;
 use egui_charts::ui::export::{ExportConfig, ExportFormat, ExportResponse};
@@ -25,7 +28,6 @@ struct Tab {
     name: String,
     workspace: Option<Workspace>,
     summary: String,
-    change: f64,
 }
 
 /// The chart slots of a layout that is not on show.
@@ -35,13 +37,93 @@ struct Workspace {
     active: usize,
 }
 
+/// The latest available market price and its change from the provider's previous close.
+fn tab_quote(quote: &Quote) -> (f64, Option<f64>) {
+    let last = quote.extended.filter(|extended| extended.time > quote.time)
+        .map_or(quote.last, |extended| extended.last);
+    let change = (quote.prev_close > 0.0).then(|| (last / quote.prev_close - 1.0) * 100.0)
+        .filter(|value| value.is_finite());
+    (last, change)
+}
+
+fn tab_price(price: f64) -> String {
+    CurrencyFormatter::new("", if price.abs() < 1.0 { 4 } else { 2 }).format(price)
+}
+
+fn show_chart_tab(
+    ui: &mut egui::Ui,
+    symbol: &str,
+    timeframe: Option<egui_charts::model::Timeframe>,
+    quote: Option<&Quote>,
+    active: bool,
+    closable: bool,
+    theme: &egui_charts::theme::Theme,
+) -> (bool, bool) {
+    let shown_symbol = symbol.rsplit(':').next().unwrap_or(symbol);
+    let font = egui::FontId::proportional(15.0);
+    let text_color = theme.ui.text;
+    let painter = ui.painter().clone();
+    let measure = |s: &str| painter.layout_no_wrap(s.to_owned(), font.clone(), text_color).size().x;
+    let (price, change) = quote.map_or(("—".to_owned(), None), |q| {
+        let (last, change) = tab_quote(q);
+        (tab_price(last), change)
+    });
+    let change_text = change.map(|value| format!("{value:+.2}%"));
+    let detail = timeframe.map(|value| format!(" / {value}" )).unwrap_or_default();
+    let width = 12.0 + 24.0 + 7.0 + measure(shown_symbol) + 7.0
+        + change_text.as_ref().map_or(0.0, |_| 14.0) + measure(&price) + 6.0
+        + change_text.as_ref().map_or(0.0, |text| measure(text) + 6.0)
+        + measure(&detail) + if closable { 34.0 } else { 10.0 };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 42.0), egui::Sense::click());
+    let bg = if active { if theme.dark { egui::Color32::from_rgb(15, 16, 18) } else { theme.ui.panel_bg } }
+        else if response.hovered() { theme.ui.btn_bg_hover } else { egui::Color32::TRANSPARENT };
+    if bg != egui::Color32::TRANSPARENT { ui.painter().rect_filled(rect, egui::CornerRadius::same(8), bg); }
+    if !active { ui.painter().vline(rect.right() - 1.0, rect.center().y - 10.0..=rect.center().y + 10.0, egui::Stroke::new(1.0, theme.ui.text_secondary.gamma_multiply(0.45))); }
+    let mut x = rect.left() + 12.0;
+    let badge = egui::pos2(x + 12.0, rect.center().y);
+    let is_spx = shown_symbol.eq_ignore_ascii_case("SPX");
+    let badge_bg = if is_spx { theme.chart.candle_down } else if theme.dark { egui::Color32::from_rgb(229, 234, 240) } else { egui::Color32::from_rgb(61, 68, 78) };
+    let badge_text = if is_spx { "500".to_owned() } else { shown_symbol.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_default() };
+    ui.painter().circle_filled(badge, 12.0, badge_bg);
+    ui.painter().text(badge, egui::Align2::CENTER_CENTER, badge_text, egui::FontId::proportional(if is_spx { 9.0 } else { 13.0 }), if is_spx || !theme.dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(23, 37, 34) });
+    x += 31.0;
+    ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, shown_symbol, font.clone(), text_color);
+    x += measure(shown_symbol) + 7.0;
+    let direction_color = match change { Some(value) if value > 0.0 => theme.chart.candle_up, Some(value) if value < 0.0 => theme.chart.candle_down, _ => theme.ui.text_secondary };
+    if let Some(value) = change {
+        let cy = rect.center().y;
+        let (tip, base) = if value >= 0.0 { (cy - 6.0, cy + 5.0) } else { (cy + 6.0, cy - 5.0) };
+        ui.painter().add(egui::Shape::convex_polygon(vec![egui::pos2(x, base), egui::pos2(x + 11.0, base), egui::pos2(x + 5.5, tip)], direction_color, egui::Stroke::NONE));
+        x += 14.0;
+    }
+    ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, &price, font.clone(), text_color);
+    x += measure(&price) + 6.0;
+    if let Some(change_text) = change_text {
+        ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, &change_text, font.clone(), direction_color);
+        x += measure(&change_text) + 6.0;
+    }
+    ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, &detail, font, theme.ui.text_secondary);
+    let accessible_name = if shown_symbol.is_empty() { "Chart tab" } else { shown_symbol };
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, accessible_name));
+    let mut closed = false;
+    if closable {
+        let close_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 18.0, rect.center().y), egui::vec2(30.0, 34.0));
+        let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
+        if close.hovered() { ui.painter().rect_filled(close_rect, 5.0, theme.ui.btn_bg_hover); }
+        icons::CLOSE.as_image_tinted(egui::vec2(16.0, 16.0), theme.ui.text_secondary)
+            .paint_at(ui, egui::Rect::from_center_size(close_rect.center(), egui::vec2(16.0, 16.0)));
+        close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close tab"));
+        closed = close.clicked();
+    }
+    (response.clicked() && !closed, closed)
+}
+
 impl Tab {
     fn unnamed() -> Self {
         Self {
             name: "Unnamed".into(),
             workspace: None,
             summary: String::new(),
-            change: 0.0,
         }
     }
 }
@@ -49,6 +131,9 @@ impl Tab {
 #[derive(Default)]
 pub(super) struct State {
     tabs: Vec<Tab>,
+    saved_workspace: Option<serde_json::Value>,
+    workspace_save_error: bool,
+    workspace_restore_error: bool,
     /// The tab on show.
     tab: usize,
     /// Whether the open-layout chooser is open.
@@ -57,6 +142,32 @@ pub(super) struct State {
     grid_edits: u64,
     /// The slot that was active at the last poll, to notice a change of slot.
     seen_active: usize,
+}
+
+/// Drawing document metadata belongs to the saved snapshot, not to each capture.
+/// Preserve it until the drawing contents actually change.
+fn retain_drawing_metadata(current: &mut serde_json::Value, previous: Option<&serde_json::Value>) {
+    let Some(old_tabs) = previous.and_then(|value| value.get("tabs")).and_then(|value| value.as_array()) else { return; };
+    let Some(new_tabs) = current.get_mut("tabs").and_then(|value| value.as_array_mut()) else { return; };
+    for tab in new_tabs {
+        let Some(name) = tab.get("name").and_then(|value| value.as_str()) else { continue; };
+        let Some(old_tab) = old_tabs.iter().find(|old| old.get("name").and_then(|value| value.as_str()) == Some(name)) else { continue; };
+        let Some(old_charts) = old_tab.pointer("/layout/charts").and_then(|value| value.as_array()) else { continue; };
+        let Some(new_charts) = tab.pointer_mut("/layout/charts").and_then(|value| value.as_array_mut()) else { continue; };
+        for (chart, old_chart) in new_charts.iter_mut().zip(old_charts) {
+            if chart.get("symbol") != old_chart.get("symbol") { continue; }
+            let Some(old) = old_chart.get("drawings").and_then(|value| value.as_object()) else { continue; };
+            let Some(new) = chart.get_mut("drawings").and_then(|value| value.as_object_mut()) else { continue; };
+            let Some(metadata) = old.get("metadata").cloned() else { continue; };
+            let unchanged = old.iter().filter(|(key, _)| *key != "metadata")
+                .eq(new.iter().filter(|(key, _)| *key != "metadata"));
+            if unchanged {
+                new.insert("metadata".into(), metadata);
+            } else if let (Some(created), Some(current)) = (metadata.get("created_at"), new.get_mut("metadata").and_then(|value| value.as_object_mut())) {
+                current.insert("created_at".into(), created.clone());
+            }
+        }
+    }
 }
 
 impl Terminal {
@@ -69,6 +180,13 @@ impl Terminal {
     }
 
     pub(super) fn layouts_poll(&mut self, ctx: &egui::Context) {
+        let symbols = self.layouts.tabs.iter().enumerate().filter_map(|(index, tab)| {
+            let chart = if index == self.layouts.tab { self.charts.get(self.active) } else {
+                tab.workspace.as_ref().and_then(|workspace| workspace.charts.get(workspace.active))
+            }?;
+            (!chart.symbol().is_empty()).then(|| chart.symbol().to_owned())
+        }).collect::<Vec<_>>();
+        self.panels.market.watchlist.set_tracked_symbols(symbols);
         // A replay belongs to the chart it was started on.
         if self.layouts.seen_active != self.active {
             self.layouts.seen_active = self.active;
@@ -135,9 +253,20 @@ impl Terminal {
     }
 
     pub(super) fn layouts_settings(&mut self, settings: &mut UserSettings, direction: Direction) {
-        let menu = &mut self.top_toolbar.layout_menu;
         match direction {
             Direction::Save => {
+                if !self.layouts.workspace_restore_error { match self.capture_open_workspace() {
+                    Ok(mut workspace) => { retain_drawing_metadata(&mut workspace, self.layouts.saved_workspace.as_ref()); self.layouts.saved_workspace = Some(workspace); self.layouts.workspace_save_error = false; }
+                    Err(error) if !error.contains("Drawings are still loading") => {
+                        if !self.layouts.workspace_save_error {
+                            self.toasts.error(format!("Workspace was not saved: {error}"));
+                            self.layouts.workspace_save_error = true;
+                        }
+                    }
+                    Err(_) => { self.layouts.workspace_save_error = true; }
+                } }
+                settings.open_workspace = self.layouts.saved_workspace.clone();
+                let menu = &mut self.top_toolbar.layout_menu;
                 settings.layout = menu
                     .curr_layout
                     .clone()
@@ -146,9 +275,16 @@ impl Terminal {
                 settings.layout_favorites = menu.favorites.clone();
             }
             Direction::Load => {
+                let menu = &mut self.top_toolbar.layout_menu;
                 menu.autosave = settings.layout_autosave;
                 menu.favorites = settings.layout_favorites.clone();
-                if let Some(layout) = &settings.layout {
+                if let Some(workspace) = settings.open_workspace.clone() {
+                    self.layouts.saved_workspace = Some(workspace.clone());
+                    if let Err(error) = self.restore_open_workspace(&workspace) {
+                        self.layouts.workspace_restore_error = true;
+                        self.toasts.error(format!("Could not restore workspace; saved data preserved: {error}"));
+                    } else { self.layouts.workspace_restore_error = false; }
+                } else if let Some(layout) = &settings.layout {
                     menu.open(layout);
                 }
             }
@@ -157,6 +293,33 @@ impl Terminal {
 
     pub(super) fn layouts_modal(&self) -> bool {
         self.layouts.chooser
+    }
+
+    pub(super) fn workspace_saved_snapshot_ready(&self) -> bool {
+        !self.layouts.workspace_save_error && !self.layouts.workspace_restore_error && self.layouts.saved_workspace.is_some()
+    }
+
+    pub(super) fn flush_parked_drawings(&mut self) -> bool {
+        let mut ready = true;
+        for tab in &mut self.layouts.tabs {
+            if let Some(workspace) = &mut tab.workspace {
+                for chart in &mut workspace.charts { ready &= chart.flush_stored_drawings(); }
+            }
+        }
+        ready
+    }
+
+    /// Retry writes that a named layout could not finish.
+    pub fn retry_layout_saves(&mut self) {
+        self.top_toolbar.layout_menu.retry_failed_writes();
+    }
+
+    /// Bring an inactive tab with a drawing conflict into view so it can be resolved.
+    pub fn focus_pending_storage_conflict(&mut self) {
+        if self.charts.iter().any(|chart| chart.storage_conflict().is_some()) { return; }
+        if let Some(index) = self.layouts.tabs.iter().position(|tab| tab.workspace.as_ref().is_some_and(|workspace| workspace.charts.iter().any(|chart| chart.storage_conflict().is_some()))) {
+            self.select_layout(index);
+        }
     }
 
     fn perform_layout_action(&mut self, action: LayoutAction) -> Option<Action> {
@@ -270,6 +433,7 @@ impl Terminal {
         chart.set_data(SeriesId::MAIN, source.bars(SeriesId::MAIN).to_vec());
         chart.set_conversion(source.conversion().map(str::to_owned));
         chart.set_study_limit(source.study_limit());
+        chart.set_time_formatter(source.time_formatter());
         Some(chart)
     }
 
@@ -281,67 +445,51 @@ impl Terminal {
 
     fn show_layout_tabs(&mut self, ui: &mut egui::Ui) {
         let chart = self.chart();
-        let bars = chart.bars(SeriesId::MAIN);
-        let last = bars.last().map_or(0.0, |bar| bar.close);
-        let previous = bars
-            .get(bars.len().saturating_sub(2))
-            .map_or(last, |bar| bar.close);
-        let summary = format!("{}  {last:.2}", chart.symbol());
-        let change = if previous == 0.0 {
-            0.0
-        } else {
-            (last / previous - 1.0) * 100.0
-        };
-        let (up, down) = (chart.config().bullish_color, chart.config().bearish_color);
+        let summary = chart.symbol().to_owned();
         let tab = &mut self.layouts.tabs[self.layouts.tab];
         tab.summary = summary;
-        tab.change = change;
-        if self.layouts.tabs.len() <= 1 {
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        let (close_hint, new_hint) = (
-            l10n::text(&ctx, "Close layout"),
-            l10n::text(&ctx, "New layout"),
-        );
+        let tabs: Vec<_> = self.layouts.tabs.iter().enumerate().filter_map(|(index, tab)| {
+            let chart = if index == self.layouts.tab { self.charts.get(self.active) } else {
+                tab.workspace.as_ref().and_then(|workspace| workspace.charts.get(workspace.active))
+            }?;
+            let symbol = chart.symbol().to_owned();
+            let quote = self.panels.market.watchlist.quote(&symbol).cloned();
+            Some((symbol, chart.timeframe(), quote))
+        }).collect();
         let mut select = None;
         let mut close = None;
         let mut new = false;
+        let bar_height = self.top_toolbar.config.height + 4.0;
+        let panel_bg = ui.style().visuals.panel_fill;
+        let bar_bg = if self.theme.dark { egui::Color32::from_rgb(42, 42, 45) } else { panel_bg.lerp_to_gamma(self.theme.ui.text, 0.08) };
         egui::Panel::top("layout_tabs")
-            .exact_size(26.0)
+            .exact_size(bar_height)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(self.theme.ui.border))
+            .frame(egui::Frame::new().fill(bar_bg))
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (index, tab) in self.layouts.tabs.iter().enumerate() {
-                            egui::Frame::new()
-                                .fill(if index == self.layouts.tab {
-                                    self.theme.ui.panel_bg
-                                } else {
-                                    self.theme.ui.border
-                                })
-                                .inner_margin(egui::Margin::symmetric(6, 0))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add(egui::Button::new(&tab.summary).frame(false))
-                                            .on_hover_text(&tab.name)
-                                            .clicked()
-                                        {
-                                            select = Some(index);
-                                        }
-                                        let color = if tab.change >= 0.0 { up } else { down };
-                                        ui.colored_label(color, format!("{:+.2}%", tab.change));
-                                        if ui.small_button("×").on_hover_text(&close_hint).clicked()
-                                        {
-                                            close = Some(index);
-                                        }
-                                    });
-                                });
+                if self.time_controls_in_tabs {
+                    self.time.bar.update_time();
+                    let width = self.time.bar.clock_and_session_width(ui)
+                        .min((ui.available_width() - 60.0).max(0.0));
+                    egui::Panel::right("layout_tabs_time")
+                        .exact_size(width)
+                        .show_separator_line(false)
+                        .frame(egui::Frame::new().fill(bar_bg))
+                        .show(ui, |ui| { self.time_show_tab_controls(ui); });
+                }
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(bar_bg)).show(ui, |ui| {
+                  egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.add_space(6.0);
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (index, (symbol, timeframe, quote)) in tabs.iter().enumerate() {
+                            let (clicked, closed) = show_chart_tab(ui, symbol, *timeframe, quote.as_ref(), index == self.layouts.tab, tabs.len() > 1, &self.theme);
+                            if clicked { select = Some(index); }
+                            if closed { close = Some(index); }
                         }
-                        new = ui.small_button("+").on_hover_text(&new_hint).clicked();
+                        new = egui_charts::ui::top_toolbar::buttons::ToolbarIconButton::new(&icons::PLUS, "New chart tab", &self.top_toolbar.config).show(ui).clicked();
                     });
+                  });
                 });
             });
         if let Some(index) = select {
@@ -350,8 +498,8 @@ impl Terminal {
         if let Some(index) = close {
             self.close_layout(index);
         }
-        if new {
-            self.new_layout(None);
+        if new && self.new_layout(None) {
+            self.perform(Action::TopToolbar(TopToolbarAction::OpenSymbolSearch));
         }
     }
 
@@ -370,7 +518,7 @@ impl Terminal {
             self.save_layout();
         }
         self.layout_stop_replay();
-        let Some(next) = self
+        let Some(mut next) = self
             .layouts
             .tabs
             .get_mut(index)
@@ -378,6 +526,8 @@ impl Terminal {
         else {
             return;
         };
+        for chart in &mut self.charts { chart.set_feed_paused(true); }
+        for chart in &mut next.charts { chart.set_feed_paused(false); }
         self.layouts.tabs[self.layouts.tab].workspace = Some(Workspace {
             charts: std::mem::replace(&mut self.charts, next.charts),
             layout: std::mem::replace(&mut self.layout, next.layout),
@@ -409,9 +559,21 @@ impl Terminal {
             };
             (charts, self.layout.clone(), self.active)
         } else {
-            let Some(chart) = self.copy_slot(self.active) else {
-                return false;
-            };
+            let chart = self.copy_slot(self.active).unwrap_or_else(|| {
+                // A custom study or drawings still loading can make a snapshot unavailable.
+                // The new tab must still open so the user can select another symbol.
+                let source = &self.charts[self.active];
+                let mut chart = ChartBuilder::new()
+                    .with_feed(self.feed.clone())
+                    .with_symbol(source.symbol())
+                    .with_timeframe(source.timeframe().unwrap_or_default())
+                    .with_theme(self.theme.clone())
+                    .build();
+                chart.set_extended_hours(source.extended_hours());
+                chart.set_chart_options(source.chart_options().clone());
+                chart.set_time_formatter(source.time_formatter());
+                chart
+            });
             (vec![chart], ChartLayout::default(), 0)
         };
         let mut name = name.unwrap_or_else(|| "Unnamed".into());
@@ -424,7 +586,6 @@ impl Terminal {
         self.layouts.tabs.push(Tab {
             name,
             summary: self.chart().symbol().to_owned(),
-            change: 0.0,
             workspace: Some(Workspace {
                 charts,
                 layout,
@@ -491,20 +652,19 @@ impl Terminal {
 
     /// The layout on show: its arrangement, the charts it shows, in slot order, and the chart
     /// sizes of the arrangement when its borders were moved.
-    fn capture_layout(&self) -> Result<SavedLayout, String> {
-        let mode = self.layout.mode;
+    fn capture_charts(&self, charts: &[Chart], layout: &ChartLayout) -> Result<SavedLayout, String> {
+        let mode = layout.mode;
         let count = if mode == ChartLayoutMode::Tabs {
-            self.charts.len()
+            charts.len()
         } else {
-            mode.chart_count().min(self.charts.len())
+            mode.chart_count().min(charts.len())
         };
-        let charts = self.charts[..count]
+        let charts = charts[..count]
             .iter()
             .map(|chart| chart.snapshot_with(self.studies.indicators.factory()))
             .collect::<Result<_, _>>()
             .map_err(|error| format!("Could not save the layout: {error}"))?;
-        let sizing = self
-            .layout
+        let sizing = layout
             .saved_sizes()
             .into_iter()
             .find(|sizes| sizes.mode == mode);
@@ -513,6 +673,55 @@ impl Terminal {
             charts,
             sizing,
         })
+    }
+
+    fn capture_layout(&self) -> Result<SavedLayout, String> {
+        self.capture_charts(&self.charts, &self.layout)
+    }
+
+    fn capture_open_workspace(&self) -> Result<serde_json::Value, String> {
+        let mut tabs = Vec::with_capacity(self.layouts.tabs.len());
+        for (index, tab) in self.layouts.tabs.iter().enumerate() {
+            let (charts, layout, active) = if index == self.layouts.tab {
+                (&self.charts, &self.layout, self.active)
+            } else {
+                let workspace = tab.workspace.as_ref().ok_or("Missing tab workspace")?;
+                (&workspace.charts, &workspace.layout, workspace.active)
+            };
+            let layout = self.capture_charts(charts, layout)?;
+            tabs.push(serde_json::json!({"name": tab.name, "active": active, "layout": layout}));
+        }
+        // Normalize through the same JSON parser used by SettingsStore, so float
+        // values compare equal to the document after it has been saved and read.
+        let document = serde_json::json!({"version": 1, "selected": self.layouts.tab, "tabs": tabs});
+        serde_json::from_str(&document.to_string()).map_err(|e| e.to_string())
+    }
+
+    fn restore_open_workspace(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        let tabs = value.get("tabs").and_then(|v| v.as_array()).filter(|v| !v.is_empty() && v.len() <= 64).ok_or("Invalid tab list")?;
+        if value.get("version").and_then(|v| v.as_u64()) != Some(1) { return Err("Unsupported workspace version".into()); }
+        let mut decoded = Vec::with_capacity(tabs.len());
+        for tab in tabs {
+            let name = tab.get("name").and_then(|v| v.as_str()).ok_or("Missing tab name")?;
+            let layout = tab.get("layout").cloned().and_then(|v| serde_json::from_value::<SavedLayout>(v).ok()).ok_or("Invalid tab layout")?;
+            let active = tab.get("active").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if name.is_empty() || decoded.iter().any(|(other, _, _): &(String, SavedLayout, usize)| other == name) { return Err("Invalid or duplicate tab name".into()); }
+            if layout.charts.is_empty() || layout.charts.len() > ChartLayoutMode::Tabs.chart_count() || (layout.mode != ChartLayoutMode::Tabs && layout.charts.len() != layout.mode.chart_count()) || active >= layout.charts.len() { return Err("Invalid chart count or selection".into()); }
+            for snapshot in &layout.charts {
+                let mut chart = ChartBuilder::new().with_feed(self.feed.clone()).with_symbol(&snapshot.symbol).with_timeframe(snapshot.interval.unwrap_or_default()).with_theme(self.theme.clone()).with_drawing_registry(self.chart().drawings().registry.clone()).build();
+                let skipped = chart.restore_with(snapshot, self.studies.indicators.factory()).map_err(|e| e.to_string())?;
+                if !skipped.is_empty() { return Err("Some saved drawings cannot be read".into()); }
+            }
+            decoded.push((name.to_owned(), layout, active));
+        }
+        let selected = value.get("selected").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        for (index, (name, layout, active)) in decoded.into_iter().enumerate() {
+            if index > 0 && !self.new_layout(None) { return Err("Could not create tab".into()); }
+            self.restore_layout(name, layout);
+            if active < self.charts.len() { self.activate_slot(active); }
+        }
+        self.select_layout(selected.min(tabs.len() - 1));
+        Ok(())
     }
 
     /// Saves the layout on show under its tab's name.
@@ -564,6 +773,7 @@ impl Terminal {
             chart.set_price_targets_visible(source.price_targets_visible());
             chart.set_event_visibility(source.event_visibility().clone());
             chart.set_conversion(source.conversion().map(str::to_owned));
+            chart.set_time_formatter(source.time_formatter());
             charts.push(chart);
         }
         if skipped_drawings > 0 {
@@ -609,6 +819,20 @@ mod tests {
     use egui_charts::studies::{CustomIndicator, IndicatorFactory, InputValue, RSI, SMA};
     use egui_charts::widget::{ChartLayoutSizing, PaneId};
     use std::sync::Arc;
+
+    #[test]
+    fn workspace_drawing_metadata_stays_stable_but_preserves_edits() {
+        let workspace = |value, created, modified| serde_json::json!({"tabs":[{"name":"Main","layout":{"charts":[{"symbol":"TEST","drawings":{"drawings":[value],"metadata":{"created_at":created,"modified_at":modified}}}]}}]});
+        let previous = workspace(1, 10, 20);
+        let mut unchanged = workspace(1, 30, 30);
+        retain_drawing_metadata(&mut unchanged, Some(&previous));
+        assert_eq!(unchanged, previous);
+        let mut edited = workspace(2, 30, 30);
+        retain_drawing_metadata(&mut edited, Some(&previous));
+        assert_eq!(edited.pointer("/tabs/0/layout/charts/0/drawings/drawings/0"), Some(&serde_json::json!(2)));
+        assert_eq!(edited.pointer("/tabs/0/layout/charts/0/drawings/metadata/created_at"), Some(&serde_json::json!(10)));
+        assert_eq!(edited.pointer("/tabs/0/layout/charts/0/drawings/metadata/modified_at"), Some(&serde_json::json!(30)));
+    }
 
     fn new_terminal(storage: &Arc<MemoryStorage>) -> Terminal {
         Terminal::new(Arc::new(TestFeed))
@@ -698,7 +922,7 @@ mod tests {
             &mut terminal,
             LayoutAction::SelectGrid(ChartLayoutMode::Four),
         );
-        // One layout needs no strip, including on compact screens.
+        // The new-tab button remains available even with one layout.
         let check_strip = |terminal: &mut Terminal, height| {
             let ctx = terminal.ctx();
             for width in [393.0, 599.0, 600.0, 1440.0] {
@@ -719,7 +943,7 @@ mod tests {
                 .drop_without_applying_deltas();
             }
         };
-        check_strip(&mut terminal, 0.0);
+        check_strip(&mut terminal, 42.0);
         for (slot, width) in [(1, 0.6), (3, 0.9)] {
             terminal.activate_slot(slot);
             terminal.chart_mut().config_mut().candle_width = width;
@@ -749,7 +973,7 @@ mod tests {
         assert_eq!(terminal.layout.mode, ChartLayoutMode::Single);
         assert_eq!(terminal.charts.len(), 1);
         assert!(!terminal.chart().config().show_grid);
-        check_strip(&mut terminal, 26.0);
+        check_strip(&mut terminal, 42.0);
         terminal
             .chart_mut()
             .user_action(|chart| chart.config_mut().show_grid = true);
@@ -787,10 +1011,7 @@ mod tests {
             terminal.theme.chart.bg
         );
         // The first close button belongs to the other layout: the one on show stays.
-        let close = frame(&mut terminal, SIZE, vec![])
-            .text_at("×")
-            .expect("close button");
-        click(&mut terminal, SIZE, close);
+        terminal.close_layout(0);
         assert_eq!(terminal.layouts.tabs.len(), 1);
         assert_eq!(terminal.layouts.tabs[0].name, "Unnamed 2");
         assert_eq!(terminal.layouts.tab, 0);

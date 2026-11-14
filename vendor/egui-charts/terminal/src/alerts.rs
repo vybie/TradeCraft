@@ -113,12 +113,13 @@ impl Terminal {
         match region {
             Region::Right if self.panel == Some(SidePanel::Alerts) => {
                 let mut action = AlertPanelAction::None;
-                egui::Panel::right("terminal_alerts")
-                    .default_size(340.0)
+                let response = egui::Panel::right("terminal_alerts")
+                    .default_size(self.panels.side_width.unwrap_or(340.0))
                     .max_size(ui.available_width() * 0.5)
                     .show(ui, |ui| {
                         action = self.alerts.panel.show(ui);
                     });
+                self.panels.side_width = Some(response.response.rect.width());
                 if action != AlertPanelAction::None {
                     self.emit(Action::Alerts(action));
                 }

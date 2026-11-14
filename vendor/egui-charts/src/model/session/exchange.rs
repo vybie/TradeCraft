@@ -167,6 +167,13 @@ impl ExchangeSessionProvider {
             && !closes.iter().any(|(extended, ..)| !extended)
     }
 
+    /// U.S. equity overnight window in the exchange's time zone.
+    pub(crate) fn is_us_equity_overnight(&self, time: DateTime<Utc>) -> bool {
+        use chrono::Timelike;
+        let hour = self.wall_time(time).hour();
+        !(4..20).contains(&hour) && !self.is_open(time, false)
+    }
+
     /// Whether the exchange is open, optionally including extended windows.
     pub fn is_open(&self, time: DateTime<Utc>, extended_hours: bool) -> bool {
         let Some(session) = &self.session else {

@@ -165,6 +165,7 @@ impl TechnicalRatings {
                     .map(String::from)
                     .to_vec(),
                 rows: Vec::new(),
+                ..StudyTable::default()
             },
             colors: vec![
                 palette::DISABLED,

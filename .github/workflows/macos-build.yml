@@ -1,0 +1,40 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/macos-build]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test provider and storage behavior
+        run: cargo test --locked -p tradecraft-providers -p tradecraft-ui-egui --lib
+      - name: Build macOS application
+        run: bash scripts/build-macos.sh "${{ matrix.target }}"
+      - name: Check executable and bundle
+        run: |
+          target/${{ matrix.target }}/release/tradecraft --commands
+          plutil -lint target/packages/*/TradeCraft.app/Contents/Info.plist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TradeCraft-macos-${{ matrix.target }}
+          path: target/packages/*.zip
+          if-no-files-found: error

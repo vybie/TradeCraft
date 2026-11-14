@@ -834,6 +834,7 @@ impl Chart {
             // Within ~1.5 bars of the right edge. With fix_right_edge the right offset is clamped
             // to <= 0, so near means no farther than 1.5 bars to the left of the edge.
             near_live: self.state.time_scale().is_near_live_edge(),
+            offset: self.state.time_scale().right_offset_precise(),
             right_edge: self.right_edge(),
             tail: bars.last().cloned(),
         }
@@ -910,7 +911,7 @@ impl Chart {
             && before.near_live
             && (appended || shift_for_whitespace);
         if follow {
-            self.scroll_to_live_edge();
+            self.follow_live_edge_at(before.offset);
         } else if !self.state.shows_elements()
             && let Some(tail) = before.tail
         {
@@ -926,6 +927,7 @@ impl Chart {
         tail: DateTime<Utc>,
         right_edge: ViewEdge,
         near_live: bool,
+        offset: f64,
     ) {
         if !self.state.shows_fallback() {
             return;
@@ -935,14 +937,14 @@ impl Chart {
             return;
         }
         if self.chart_options.time_scale.shift_visible_range_on_new_bar && near_live {
-            self.scroll_to_live_edge();
+            self.follow_live_edge_at(offset);
         } else {
             self.keep_bars_in_view(&self.clock(), tail, right_edge);
         }
     }
 
-    fn scroll_to_live_edge(&mut self) {
-        self.state.time_scale_mut().scroll_to_realtime();
+    fn follow_live_edge_at(&mut self, offset: f64) {
+        self.state.time_scale_mut().set_right_offset(offset);
         // A pending start index would move the view away from the edge again.
         self.pending_start_idx = None;
     }
@@ -1012,6 +1014,7 @@ pub(super) struct ViewEdge {
 /// The bars and the view before the bars change, for [`Chart::bars_changed`].
 struct Edge {
     near_live: bool,
+    offset: f64,
     right_edge: ViewEdge,
     tail: Option<Bar>,
 }

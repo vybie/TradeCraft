@@ -425,7 +425,7 @@ impl Chart {
                 };
                 let formatter = self.series_label_formatter(item.id, PriceScaleMode::Normal);
                 let value = bar.map_or_else(
-                    || "∅".into(),
+                    || "-".into(),
                     |bar| {
                         formatter.as_ref().map_or_else(
                             || {

@@ -553,9 +553,9 @@ impl Terminal {
         let mut sources = self.build_source_items();
         let state = &mut self.drawings;
         let mut action = ObjectTreeAction::None;
-        egui::Panel::right("detail_panel")
+        let response = egui::Panel::right("detail_panel")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(self.panels.side_width.unwrap_or(300.0))
             .min_size(220.0)
             .show(ui, |ui| {
                 if panel == SidePanel::ObjectTree {
@@ -565,6 +565,7 @@ impl Terminal {
                     state.data_window_folded = !expanded;
                 }
             });
+        self.panels.side_width = Some(response.response.rect.width());
         if !matches!(action, ObjectTreeAction::None) {
             self.emit(Action::ObjectTree(action));
         }

@@ -50,11 +50,26 @@ pub fn vibestrader_token() -> Result<String, &'static str> {
     Err("VibesTrader's credential is available on Windows only")
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn tradecraft_token() -> Result<String, &'static str> {
+    let bytes = security_framework::passwords::get_generic_password("TradeCraft.Tradier", "production")
+        .map_err(|_| "Could not read the saved Tradier credential from Keychain")?;
+    let token = String::from_utf8(bytes).map_err(|_| "Saved Tradier credential is invalid")?;
+    if token.trim().is_empty() { return Err("The saved Tradier credential is empty"); }
+    Ok(token)
+}
+
+#[cfg(target_os = "macos")]
+pub fn save_tradecraft_token(token: &str) -> Result<(), &'static str> {
+    security_framework::passwords::set_generic_password("TradeCraft.Tradier", "production", token.as_bytes())
+        .map_err(|_| "Could not save credential in macOS Keychain")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn tradecraft_token() -> Result<String, &'static str> {
     Err("Credential storage is available on Windows only")
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn save_tradecraft_token(_: &str) -> Result<(), &'static str> {
     Err("Credential storage is available on Windows only")
 }

@@ -265,19 +265,34 @@ impl SettingsDialog {
 
                 self.draw_setting_row_with_controls(ui, "Timezone", theme, |ui, dialog| {
                     let curr_tz = dialog.settings.timezone.clone();
+                    let selected = if curr_tz == "Local" {
+                        "Local time"
+                    } else if curr_tz.starts_with("Exchange:") {
+                        "Exchange time"
+                    } else {
+                        &curr_tz
+                    };
                     styled_dropdown(
                         ui,
                         "timezone",
                         DESIGN_TOKENS.sizing.settings_dialog.dropdown_width,
                         theme.ui.text,
-                        &curr_tz,
+                        selected,
                         |ui| {
                             for tz in &dialog.timezones {
-                                ui.selectable_value(
-                                    &mut dialog.settings.timezone,
-                                    tz.clone(),
-                                    l10n::text(ui.ctx(), tz.as_str()),
-                                );
+                                let label = match tz.as_str() {
+                                    "Local" => "Local time",
+                                    "Exchange:UTC" => "Exchange time (UTC if unknown)",
+                                    name => name,
+                                };
+                                let active = curr_tz == *tz
+                                    || tz == "Exchange:UTC" && curr_tz.starts_with("Exchange:");
+                                if ui
+                                    .selectable_label(active, l10n::text(ui.ctx(), label))
+                                    .clicked()
+                                {
+                                    dialog.settings.timezone = tz.clone();
+                                }
                             }
                         },
                     );

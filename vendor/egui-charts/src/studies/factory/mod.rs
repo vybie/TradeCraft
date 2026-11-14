@@ -76,6 +76,7 @@ pub struct IndicatorFactory {
     constructors: HashMap<String, (Option<&'static str>, IndicatorConstructor)>,
     help_urls: HashMap<&'static str, &'static str>,
     defaults: HashMap<String, StudyTemplate>,
+    saved_study_resolver: Option<Box<dyn Fn(&str) -> Option<Box<dyn Indicator>> + Send + Sync>>,
 }
 
 impl IndicatorFactory {
@@ -99,6 +100,7 @@ impl IndicatorFactory {
             constructors: HashMap::new(),
             help_urls: HashMap::new(),
             defaults: HashMap::new(),
+            saved_study_resolver: None,
         };
 
         factory.register_builtin();
@@ -510,7 +512,12 @@ impl IndicatorFactory {
 
     /// Reconstruct saved state without applying defaults intended for new studies.
     pub(crate) fn create_registered(&self, name: &str) -> Option<Box<dyn Indicator>> {
-        self.constructors.get(name).map(|(_, f)| f())
+        self.constructors.get(name).map(|(_, f)| f()).or_else(|| self.saved_study_resolver.as_ref().and_then(|resolver| resolver(name)))
+    }
+
+    /// Supply host-owned studies identified by a self-contained saved key.
+    pub fn set_saved_study_resolver(&mut self, resolver: impl Fn(&str) -> Option<Box<dyn Indicator>> + Send + Sync + 'static) {
+        self.saved_study_resolver = Some(Box::new(resolver));
     }
 
     /// The category of the indicator registered under `name`, such as `"Momentum"` or

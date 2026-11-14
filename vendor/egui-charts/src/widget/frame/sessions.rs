@@ -201,6 +201,33 @@ mod tests {
 
     #[cfg(feature = "timezones")]
     #[test]
+    fn pre_and_post_sessions_use_distinct_fills_and_early_close() {
+        use crate::model::{Bar, BarData, OverrideWindow, SessionOverride, Timeframe};
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 27).unwrap();
+        let clock = |h, m| chrono::NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        let bars = ["2026-11-27T13:00:00Z", "2026-11-27T16:00:00Z", "2026-11-27T19:00:00Z"]
+            .into_iter().map(|t| Bar::new(t.parse().unwrap(), 100.0, 101.0, 99.0, 100.0, 1.0)).collect();
+        let mut chart = crate::widget::Chart::new(BarData::from_bars(bars));
+        chart.set_timeframe(Timeframe::Min15);
+        chart.config.session_config = Some(crate::config::SessionConfig {
+            show_premarket: true, show_postmarket: true,
+            overrides: vec![SessionOverride::new(date)
+                .with_windows([OverrideWindow::new(clock(9,30), clock(13,0))])
+                .with_extended_windows([OverrideWindow::new(clock(4,0), clock(9,30)), OverrideWindow::new(clock(13,0), clock(20,0))])],
+            ..crate::config::SessionConfig::nyse()
+        });
+        chart.config.show_extended_hours = true;
+        let pre = egui::Color32::from_rgba_unmultiplied(56, 102, 180, 32);
+        let post = egui::Color32::from_rgba_unmultiplied(138, 91, 176, 32);
+        chart.config.extended_hours_color = pre;
+        chart.config.post_market_color = Some(post);
+        let painted = shapes(&egui::Context::default(), &mut chart, 0.0, vec![]);
+        assert_eq!(painted.iter().filter(|s| matches!(s, Shape::Rect(r) if r.fill == pre)).count(), 1);
+        assert_eq!(painted.iter().filter(|s| matches!(s, Shape::Rect(r) if r.fill == post)).count(), 1);
+    }
+
+    #[cfg(feature = "timezones")]
+    #[test]
     fn configured_sessions_reach_breaks_and_extended_shading() {
         use crate::model::{Bar, BarData, Timeframe};
         let times = [

@@ -74,6 +74,8 @@ pub enum StudyError {
     /// The chart holds as many studies as its study cap allows. The refused study comes back
     /// unchanged.
     StudyLimitReached(RefusedStudy),
+    /// This study is already on the chart.
+    DuplicateStudy(String),
     /// The text is not study clipboard text.
     NotClipboard,
     /// The copied study cannot be read.
@@ -157,6 +159,7 @@ impl fmt::Display for StudyError {
             Self::UnknownSourcePlot { id, plot } => write!(f, "study {id} has no plot {plot}"),
             Self::CyclicSource => f.write_str("the study would read its own output"),
             Self::StudyLimitReached(_) => f.write_str("study limit reached"),
+            Self::DuplicateStudy(name) => write!(f, "{name} is already on this chart"),
             Self::NotClipboard => f.write_str("not a study clipboard"),
             Self::Clipboard(error) => write!(f, "cannot read the copied study: {error}"),
         }

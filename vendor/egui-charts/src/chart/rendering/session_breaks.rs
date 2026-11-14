@@ -76,6 +76,9 @@ pub(crate) fn exchange_session(
                 .extended_windows
                 .push(SessionWindow::new(days, close, end));
         }
+        if !config.overrides.is_empty() {
+            hours.overrides.clone_from(&config.overrides);
+        }
         session = Some(hours);
     }
     if local_zone {
@@ -99,17 +102,21 @@ pub(crate) fn render_extended_hours(
     mapping: &ChartMapping,
     start_idx: usize,
     color: Color32,
+    post_color: Option<Color32>,
+    overnight_color: Option<Color32>,
 ) -> Vec<egui::Rect> {
     let mut shaded = Vec::new();
     let mut start = None;
+    let mut active_color = color;
     for i in 0..=bars.len() {
-        let extended = bars
-            .get(i)
-            .is_some_and(|bar| provider.is_extended(bar.time));
-        if extended && start.is_none() {
-            start = Some(i);
-        }
-        if !extended && let Some(first) = start.take() {
+        let current = bars.get(i).and_then(|bar| {
+            if !provider.is_extended(bar.time) {
+                return overnight_color.filter(|_| provider.is_us_equity_overnight(bar.time));
+            }
+            let is_post = matches!(provider.market_session(bar.time), Some(crate::model::session::MarketSession::PostMarket));
+            Some(if is_post { post_color.unwrap_or(color) } else { color })
+        });
+        if start.is_some() && current != Some(active_color) && let Some(first) = start.take() {
             let x0 = mapping.idx_to_x(start_idx + first) - mapping.bar_spacing / 2.0;
             let x1 = mapping.idx_to_x(start_idx + i - 1) + mapping.bar_spacing / 2.0;
             let rect = egui::Rect::from_min_max(
@@ -118,9 +125,13 @@ pub(crate) fn render_extended_hours(
             )
             .intersect(ctx.rect);
             if rect.is_positive() {
-                ctx.painter.rect_filled(rect, 0.0, color);
+                ctx.painter.rect_filled(rect, 0.0, active_color);
                 shaded.push(rect);
             }
+        }
+        if let Some(next) = current && start.is_none() {
+            start = Some(i);
+            active_color = next;
         }
     }
     shaded

@@ -66,6 +66,16 @@ impl Terminal {
         self
     }
 
+    /// Refresh the host's indicator catalogue without closing the dialog.
+    pub fn set_indicator_factory(&mut self, factory: IndicatorFactory) {
+        self.studies.indicators = std::mem::take(&mut self.studies.indicators).with_factory(factory);
+    }
+
+    /// Offer the host's script manager in the indicator dialog.
+    pub fn set_script_manager_available(&mut self, available: bool) {
+        self.studies.indicators.manage_scripts = available;
+    }
+
     pub(super) fn studies_init(&mut self) {
         for control in [
             Control::Indicators,
@@ -145,6 +155,9 @@ impl Terminal {
             Action::SymbolPicked(instrument) => self.switch_symbol(&instrument.symbol),
             // The dialog keeps its favourites itself and they are saved with the settings.
             Action::Indicators(IndicatorDialogAction::AddIndicator(study)) => self.add_study(study),
+            Action::Indicators(IndicatorDialogAction::ManageScripts) => return Some(Action::Indicators(IndicatorDialogAction::ManageScripts)),
+            Action::Indicators(IndicatorDialogAction::EditScript(id)) => return Some(Action::Indicators(IndicatorDialogAction::EditScript(id))),
+            Action::Indicators(IndicatorDialogAction::ManageScript(id)) => return Some(Action::Indicators(IndicatorDialogAction::ManageScript(id))),
             Action::Indicators(_) => {}
             Action::Settings(SettingsAction::Apply(state)) => self.apply_chart_settings(*state),
             Action::Settings(SettingsAction::PreviewSound { name, volume }) => {

@@ -387,6 +387,11 @@ impl Chart {
     /// Per-drawing storage notifications are disabled and cleared. To consume them alongside
     /// automatic storage, call `chart.drawings_mut().set_sync_enabled(true)` after attaching it.
     pub fn set_storage(&mut self, storage: Arc<dyn Storage>) {
+        // Re-wiring a parked chart to the same service must retain any pending writes and
+        // conflicts; replacing the store here would silently drop them during a tab switch.
+        if self.drawing_store.as_ref().is_some_and(|store| Arc::ptr_eq(&store.storage, &storage)) {
+            return;
+        }
         self.drawings.set_sync_enabled(false);
         for (manager, _) in self.symbol_drawings.values_mut() {
             manager.set_sync_enabled(false);

@@ -68,7 +68,7 @@ impl StudyValue {
             return formatted.clone();
         }
         self.value.filter(|value| value.is_finite()).map_or_else(
-            || "∅".to_owned(),
+            || "-".to_owned(),
             |value| self.format.format(value, Some(self.precision)),
         )
     }

@@ -12,6 +12,8 @@
 )]
 
 pub mod credentials;
+pub mod crypto;
+pub mod crypto_names;
 pub mod market;
 pub mod reference;
 pub mod settings;

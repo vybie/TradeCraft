@@ -69,6 +69,7 @@ impl Performance {
                 title: "Performance".into(),
                 columns: vec!["Period".into(), "Change".into()],
                 rows: Vec::new(),
+                ..StudyTable::default()
             },
             colors: [palette::BLUE; 6],
             visible: true,

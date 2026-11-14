@@ -39,6 +39,7 @@ impl Chart {
                     tail,
                     self.right_edge(),
                     self.state.time_scale().is_near_live_edge(),
+                    self.state.time_scale().right_offset_precise(),
                 )
             });
         self.state.set_fallback_series(
@@ -60,8 +61,8 @@ impl Chart {
                 )
         });
         self.state.time_scale_mut().set_content_range(range);
-        if let Some((tail, right_edge, near_live)) = tail {
-            self.added_slots_arrived(tail, right_edge, near_live);
+        if let Some((tail, right_edge, near_live, offset)) = tail {
+            self.added_slots_arrived(tail, right_edge, near_live, offset);
         }
     }
 

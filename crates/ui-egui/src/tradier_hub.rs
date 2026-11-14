@@ -90,6 +90,21 @@ struct Chart {
     recovery: Option<Recovery>,
     recovered_before: Option<DateTime<Utc>>,
     last_received_at: DateTime<Utc>,
+    last_tick_time: Option<DateTime<Utc>>,
+    tick_gap: Option<TickGap>,
+}
+struct TickGap {
+    generation: u64,
+    since: DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
+    ready_at: Option<DateTime<Utc>>,
+    in_flight: bool,
+    retry_at: Option<std::time::Instant>,
+}
+struct TickGapResult {
+    id: SubscriptionId,
+    generation: u64,
+    result: Result<Vec<egui_charts::model::Bar>, String>,
 }
 struct Recovery {
     generation: u64,
@@ -129,6 +144,7 @@ fn update_quote(quote: &mut Quote, price: f64, time: DateTime<Utc>, regular: Opt
     }
     match regular {
         Some(true) => {
+            crate::tradier_watchlist::begin_regular_session(quote, time);
             quote.last = price;
             quote.time = time;
             true
@@ -177,6 +193,7 @@ async fn run(
     let (snapshot_tx, mut snapshot_rx) = mpsc::unbounded_channel();
     let (calendar_tx, mut calendar_rx) = mpsc::unbounded_channel();
     let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel();
+    let (tick_gap_tx, mut tick_gap_rx) = mpsc::unbounded_channel::<TickGapResult>();
     let mut calendars = HashMap::new();
     let mut calendar_pending = HashSet::new();
     let mut calendar_retry = HashMap::new();
@@ -197,21 +214,32 @@ async fn run(
         .date_naive();
     let mut refresh = tokio::time::interval(Duration::from_millis(250));
     let eastern = Utc::now().with_timezone(&chrono_tz::America::New_York);
-    let key = (eastern.year(), eastern.month());
-    calendar_pending.insert(key);
-    let calendar_client = client.clone();
-    let calendar_token = token.clone();
-    let initial_calendar = calendar_tx.clone();
-    tokio::spawn(async move {
-        let _ = initial_calendar.send((
-            key,
-            reference::tradier_calendar(&calendar_client, &calendar_token, key.0, key.1).await,
-        ));
-    });
+    for months in 0..3 {
+        let Some(date) = eastern.date_naive().with_day(1).and_then(|d| d.checked_sub_months(chrono::Months::new(months))) else { continue; };
+        let key = (date.year(), date.month());
+        calendar_pending.insert(key);
+        let calendar_client = client.clone();
+        let calendar_token = token.clone();
+        let initial_calendar = calendar_tx.clone();
+        tokio::spawn(async move {
+            let _ = initial_calendar.send((
+                key,
+                reference::tradier_calendar(&calendar_client, &calendar_token, key.0, key.1).await,
+            ));
+        });
+    }
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                Some(Command::Chart(sub)) => { sub.sink.set_status(if connected { FeedStatus::Live } else { FeedStatus::Connecting }); charts.push(Chart { sub: *sub, recovery: None, recovered_before: None, last_received_at: Utc::now() }); },
+                Some(Command::Chart(sub)) => {
+                    sub.sink.set_status(if connected { FeedStatus::Live } else { FeedStatus::Connecting });
+                    let tick_gap = if super::terminal_feed::is_single_tick(sub.timeframe) {
+                        recovery_generation = recovery_generation.wrapping_add(1);
+                        if let Ok(mut state) = state.lock() { state.tick_status = "Tick history varies by symbol and session; exact joins cannot be guaranteed".into(); }
+                        Some(TickGap { generation: recovery_generation, since: Utc::now() - chrono::Duration::minutes(3), until: None, ready_at: None, in_flight: false, retry_at: None })
+                    } else { None };
+                    charts.push(Chart { sub: *sub, recovery: None, recovered_before: None, last_received_at: Utc::now(), last_tick_time: None, tick_gap });
+                },
                 Some(Command::Quotes(symbols, events)) => {
                     let symbols: HashSet<_> = symbols.into_iter().collect();
                     for symbol in &symbols { if let Some(quote) = quotes.get(symbol) { events.push((symbol.clone(), quote.clone())); } }
@@ -231,7 +259,14 @@ async fn run(
                     if !is_connected && ever_connected {
                         let oldest = charts.iter().map(|chart| chart.recovery.as_ref().map_or(chart.last_received_at, |recovery| recovery.since.min(chart.last_received_at))).min().unwrap_or(now);
                         outage_since = Some(outage_since.map_or(oldest, |previous| previous.min(oldest)));
-                        for chart in &mut charts { chart.recovery = None; }
+                        for chart in &mut charts {
+                            chart.recovery = None;
+                            if super::terminal_feed::is_single_tick(chart.sub.timeframe) {
+                                recovery_generation = recovery_generation.wrapping_add(1);
+                                let since = chart.last_tick_time.map(|t| t + chrono::Duration::milliseconds(1)).unwrap_or(now - chrono::Duration::minutes(3));
+                                chart.tick_gap = Some(TickGap { generation: recovery_generation, since, until: None, ready_at: None, in_flight: false, retry_at: None });
+                            }
+                        }
                     }
                     connected = is_connected;
                     if connected && let Some(since) = outage_since.take() {
@@ -241,7 +276,7 @@ async fn run(
                             let retention = match (interval, chart.sub.extended_hours) {
                                 (tradecraft_core::Interval::OneMinute, true) => 10,
                                 (tradecraft_core::Interval::OneMinute, false) => 20,
-                                (tradecraft_core::Interval::OneDay, _) => 730,
+                                (tradecraft_core::Interval::OneDay | tradecraft_core::Interval::OneWeek | tradecraft_core::Interval::OneMonth, _) => 730,
                                 (_, true) => 18,
                                 (_, false) => 40,
                             };
@@ -285,6 +320,21 @@ async fn run(
                         if chart.sub.symbol == symbol && chart.sub.sink.is_active() { chart.last_received_at = Utc::now(); }
                         if chart.sub.symbol == symbol && chart.sub.sink.is_active() && chart.recovered_before.is_none_or(|cutoff| time >= cutoff) && (chart.sub.extended_hours || regular == Some(true)) {
                             let tick = Tick::new(time, trade.price, trade.size, None);
+                            if super::terminal_feed::is_single_tick(chart.sub.timeframe) {
+                                if let Some(gap) = &mut chart.tick_gap && gap.until.is_none() {
+                                    if (chart.sub.extended_hours || regular == Some(true)) && time > gap.since {
+                                        if time - gap.since > chrono::Duration::minutes(10) {
+                                            gap.since = time - chrono::Duration::minutes(10);
+                                            if let Ok(mut state) = state.lock() { state.tick_status = "Some tick history is beyond the 10-minute recovery window".into(); }
+                                        }
+                                        gap.until = Some(time);
+                                        gap.ready_at = Some(crate::tradier_backfill::next_minute(time) + chrono::Duration::seconds(5));
+                                    } else if (!chart.sub.extended_hours && regular == Some(false)) || time <= gap.since {
+                                        chart.tick_gap = None;
+                                    }
+                                }
+                                chart.last_tick_time = Some(chart.last_tick_time.map_or(time, |old| old.max(time)));
+                            }
                             if let Some(recovery) = &mut chart.recovery && !recovery.delay_calibrated {
                                 let now = Utc::now();
                                 let delayed = crate::tradier_backfill::delayed_cutoff(now, time);
@@ -335,7 +385,11 @@ async fn run(
                     if let Some(quote) = quotes.get_mut(&symbol) && update_quote(quote, trade.price, time, regular) {
                         for watcher in &watchers { if watcher.events.is_active() && watcher.symbols.contains(&symbol) { watcher.events.push((symbol.clone(), quote.clone())); } }
                     }
-                    if !charts.iter().any(|chart| chart.recovery.is_some()) && let Some(message) = super::terminal_feed::price_update_status(trade.timestamp_ms) && let Ok(mut state) = state.lock() { state.status = message; }
+                    if !charts.iter().any(|chart| chart.recovery.is_some())
+                        && charts.iter().any(|chart| chart.sub.symbol == symbol && chart.sub.sink.is_active())
+                        && let Some(message) = super::terminal_feed::price_update_status(trade.timestamp_ms)
+                        && let Ok(mut state) = state.lock()
+                    { state.status = message; state.last_price_update = Some(time); }
                 },
                 Some(StreamEvent::RejectedSymbol(symbol)) => {
                     if current.contains(&symbol) {
@@ -353,8 +407,7 @@ async fn run(
                         for item in snapshot {
                             if !current.contains(&item.symbol) { continue; }
                             let quote = quotes.entry(item.symbol.clone()).or_insert_with(|| Quote::new(item.last, item.previous_close, item.time));
-                            quote.prev_close = item.previous_close;
-                            if item.time > quote.time { quote.last = item.last; quote.time = item.time; }
+                            crate::tradier_watchlist::merge_snapshot(quote, &item);
                             for watcher in &watchers { if watcher.events.is_active() && watcher.symbols.contains(&item.symbol) { watcher.events.push((item.symbol.clone(), quote.clone())); } }
                         }
                     },
@@ -403,15 +456,38 @@ async fn run(
                         state.status = "Stream connected · chart history restored".into();
                     }
             },
+            result = tick_gap_rx.recv() => if let Some(result) = result {
+                if let Some(chart) = charts.iter_mut().find(|c| c.sub.id == result.id)
+                    && let Some(gap) = &mut chart.tick_gap && gap.generation == result.generation && chart.sub.sink.is_active() {
+                    match result.result {
+                        Ok(bars) => {
+                            for bar in bars { chart.sub.sink.push_bar(bar); }
+                            chart.tick_gap = None;
+                            if let Ok(mut state) = state.lock() && state.tick_status.starts_with("Tick history recovery failed") {
+                                state.tick_status = "Tick history varies by symbol and session; exact joins cannot be guaranteed".into();
+                            }
+                        }
+                        Err(error) => { gap.in_flight = false; gap.retry_at = Some(std::time::Instant::now() + Duration::from_secs(30)); if let Ok(mut state) = state.lock() { state.tick_status = format!("Tick history recovery failed; retrying: {error}"); } }
+                    }
+                }
+            },
             result = calendar_rx.recv() => if let Some((key, result)) = result {
                 calendar_pending.remove(&key);
                 match result {
-                    Ok(calendar) => { calendars.insert(key, calendar); if let Ok(mut state) = state.lock() && state.watchlist_error.starts_with("Market calendar unavailable") { state.watchlist_error.clear(); } },
-                    Err(_) => { calendar_retry.insert(key, std::time::Instant::now() + Duration::from_secs(60)); if let Ok(mut state) = state.lock() { state.watchlist_error = "Market calendar unavailable; regular-hours updates paused".into(); } },
+                    Ok(calendar) => {
+                        if let Ok(mut state) = state.lock() {
+                            for day in calendar_session_overrides(&calendar) { state.calendar_overrides.insert(day.date, day); }
+                            if state.watchlist_error.starts_with("Market calendar unavailable") { state.watchlist_error.clear(); }
+                        }
+                        calendars.insert(key, calendar);
+                    },
+                    Err(_) => { calendar_retry.insert(key, std::time::Instant::now() + Duration::from_secs(60)); let now = Utc::now().with_timezone(&chrono_tz::America::New_York); if key == (now.year(), now.month()) && let Ok(mut state) = state.lock() { state.watchlist_error = "Market calendar unavailable; regular-hours updates paused".into(); } },
                 }
             },
             _ = refresh.tick() => {
                 charts.retain(|chart| chart.sub.sink.is_active());
+                if !charts.iter().any(|chart| super::terminal_feed::is_single_tick(chart.sub.timeframe))
+                    && let Ok(mut state) = state.lock() { state.tick_status.clear(); }
                 watchers.retain(|watcher| watcher.events.is_active());
                 let mut symbols = BTreeSet::new();
                 for chart in &charts { symbols.insert(chart.sub.symbol.clone()); }
@@ -440,6 +516,13 @@ async fn run(
                 if connected {
                     let now = Utc::now();
                     for chart in &mut charts {
+                        if let Some(gap) = &mut chart.tick_gap && !gap.in_flight
+                            && gap.ready_at.is_some_and(|ready| now >= ready)
+                            && gap.retry_at.is_none_or(|retry| std::time::Instant::now() >= retry)
+                            && let Some(until) = gap.until {
+                            gap.in_flight = true;
+                            request_tick_gap(&chart.sub, gap.generation, gap.since, until, &token, tick_gap_tx.clone());
+                        }
                         if let Some(recovery) = &mut chart.recovery
                             && !recovery.in_flight
                             && now >= recovery.ready_at
@@ -457,6 +540,57 @@ async fn run(
     stream_task.abort();
 }
 
+fn calendar_session_overrides(calendar: &serde_json::Value) -> Vec<egui_charts::model::SessionOverride> {
+    use egui_charts::model::{OverrideWindow, SessionOverride};
+    let data = &calendar["calendar"]["days"]["day"];
+    let entries: Vec<_> = match data {
+        serde_json::Value::Array(days) => days.iter().collect(),
+        serde_json::Value::Object(_) => vec![data],
+        _ => return Vec::new(),
+    };
+    entries.into_iter().filter_map(|day| {
+        let date = chrono::NaiveDate::parse_from_str(day["date"].as_str()?, "%Y-%m-%d").ok()?;
+        let open = day["open"]["start"].as_str().and_then(|s| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok());
+        let close = day["open"]["end"].as_str().and_then(|s| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok());
+        if let (Some(open), Some(close)) = (open, close) {
+            let pre = chrono::NaiveTime::from_hms_opt(4, 0, 0)?;
+            let post = chrono::NaiveTime::from_hms_opt(20, 0, 0)?;
+            let mut extended = Vec::new();
+            if pre < open { extended.push(OverrideWindow::new(pre, open)); }
+            if close < post { extended.push(OverrideWindow::new(close, post)); }
+            Some(SessionOverride::new(date).with_windows([OverrideWindow::new(open, close)]).with_extended_windows(extended))
+        } else if day["status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("closed")) {
+            Some(SessionOverride::new(date))
+        } else { None }
+    }).collect()
+}
+
+fn request_tick_gap(
+    sub: &Subscription,
+    generation: u64,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+    token: &str,
+    tx: mpsc::UnboundedSender<TickGapResult>,
+) {
+    let id = sub.id;
+    let symbol = sub.symbol.clone();
+    let extended_hours = sub.extended_hours;
+    let token = token.to_owned();
+    tokio::spawn(async move {
+        let result = async {
+            let ticks = market::tradier_ticks_range(&symbol, &token, since, until, extended_hours).await?;
+            super::terminal_feed::tick_bars(ticks).map_err(|e| e.to_string())
+        }
+        .await;
+        let _ = tx.send(TickGapResult {
+            id,
+            generation,
+            result,
+        });
+    });
+}
+
 fn request_snapshot(
     token: &str,
     symbols: Vec<String>,
@@ -472,7 +606,10 @@ fn request_snapshot(
             }
         };
         for chunk in symbols.chunks(100) {
-            let result = reference::tradier_quotes(&client, &token, chunk).await;
+            let result = match reference::tradier_quotes(&client, &token, chunk).await {
+                Ok(quotes) => Ok(crate::tradier_watchlist::restore_completed_changes(&token, quotes, Utc::now()).await),
+                Err(error) => Err(error),
+            };
             let failed = result.is_err();
             if tx.send(result).is_err() || failed {
                 break;
@@ -519,7 +656,7 @@ fn request_backfill(
                 BackfillStage::Reconcile => {
                     let minute_start =
                         crate::tradier_backfill::partial_start(&clock, interval, cutoff);
-                    let (history, minutes) = tokio::join!(
+                    let (history, minutes, daily) = tokio::join!(
                         market::tradier_history_range(
                             &symbol,
                             &token,
@@ -528,6 +665,30 @@ fn request_backfill(
                             since,
                             Some(cutoff)
                         ),
+                        async {
+                            if matches!(
+                                interval,
+                                tradecraft_core::Interval::OneWeek
+                                    | tradecraft_core::Interval::OneMonth
+                            ) {
+                                let start = crate::tradier_backfill::slot(
+                                    &clock,
+                                    interval,
+                                    cutoff - chrono::Duration::milliseconds(1),
+                                );
+                                market::tradier_history_range(
+                                    &symbol,
+                                    &token,
+                                    extended,
+                                    tradecraft_core::Interval::OneDay,
+                                    start,
+                                    Some(cutoff),
+                                )
+                                .await
+                            } else {
+                                Ok(Vec::new())
+                            }
+                        },
                         market::tradier_history_range(
                             &symbol,
                             &token,
@@ -544,9 +705,18 @@ fn request_backfill(
                         .filter(|bar| bar.time + chrono::Duration::minutes(1) <= cutoff)
                         .map(|bar| bar.time)
                         .collect();
-                    let bars = crate::tradier_backfill::reconcile(
-                        history, minutes, &clock, interval, cutoff,
-                    );
+                    let bars = if matches!(
+                        interval,
+                        tradecraft_core::Interval::OneWeek | tradecraft_core::Interval::OneMonth
+                    ) {
+                        crate::tradier_backfill::reconcile_calendar(
+                            history, daily?, minutes, &clock, interval, cutoff,
+                        )
+                    } else {
+                        crate::tradier_backfill::reconcile(
+                            history, minutes, &clock, interval, cutoff,
+                        )
+                    };
                     Ok(BackfillData {
                         bars,
                         covered_minutes,
@@ -567,6 +737,19 @@ fn request_backfill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn calendar_shading_uses_early_closes_and_holidays() {
+        let data = serde_json::json!({"calendar":{"days":{"day":[
+            {"date":"2026-11-27", "open":{"start":"09:30","end":"13:00"}},
+            {"date":"2026-11-26", "status":"closed"}
+        ]}}});
+        let overrides = calendar_session_overrides(&data);
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[0].windows[0].close, chrono::NaiveTime::from_hms_opt(13, 0, 0).unwrap());
+        assert_eq!(overrides[0].extended_windows[1].open, chrono::NaiveTime::from_hms_opt(13, 0, 0).unwrap());
+        assert!(overrides[1].windows.is_empty());
+        assert!(overrides[1].extended_windows.is_empty());
+    }
     #[test]
     fn streamed_prices_preserve_previous_close_and_ignore_stale_or_unknown_sessions() {
         let time = DateTime::<Utc>::from_timestamp(1_751_376_600, 0).unwrap();

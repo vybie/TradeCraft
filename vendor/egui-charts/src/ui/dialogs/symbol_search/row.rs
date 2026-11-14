@@ -30,7 +30,7 @@ impl SymbolSearchDialog {
             egui::WidgetInfo::labeled(
                 egui::Role::ListBoxOption,
                 response.enabled(),
-                &symbol.symbol,
+                display_text(symbol).0,
             )
         });
         ui.ctx().accesskit_node_builder(response.id, |node| {
@@ -137,7 +137,7 @@ impl SymbolSearchDialog {
         paint_symbol_mark(
             ui.painter(),
             mark,
-            &symbol.symbol,
+            display_text(symbol).0,
             symbol.logo.as_deref().map(egui::ImageSource::from),
         );
         let left = mark.right() + 8.0;
@@ -252,8 +252,41 @@ impl SymbolSearchDialog {
 /// Keep the listing venue visible when the host also identifies its data provider.
 fn venue_label(symbol: &Instrument) -> String {
     match (symbol.exchange.as_deref(), symbol.source.as_deref()) {
-        (Some(exchange), Some(source)) if exchange != source => format!("{exchange} · {source}"),
+        (Some(exchange), Some(source)) if !exchange.eq_ignore_ascii_case(source) => {
+            format!("{exchange} · {source}")
+        }
         (exchange, source) => exchange.or(source).unwrap_or_default().to_owned(),
+    }
+}
+
+/// Keep the provider key intact while giving Kraken assets a human-readable result label.
+fn display_text(symbol: &Instrument) -> (&str, &str) {
+    if symbol.symbol_type == Some(crate::model::SymbolType::Crypto)
+        && symbol
+            .source
+            .as_deref()
+            .is_some_and(|source| source.eq_ignore_ascii_case("Kraken"))
+    {
+        let market = symbol
+            .symbol
+            .strip_prefix("KRAKEN:")
+            .unwrap_or(&symbol.symbol);
+        let market = if market == "BTCUSD" {
+            "BTC/USD"
+        } else {
+            market
+        };
+        let name = symbol
+            .description
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| market.split('/').next().unwrap_or(market));
+        (name, market)
+    } else {
+        (
+            &symbol.symbol,
+            symbol.description.as_deref().unwrap_or(&symbol.symbol),
+        )
     }
 }
 
@@ -292,7 +325,8 @@ pub(super) fn paint_symbol_text(
         job.wrap = egui::text::TextWrapping::truncate_at_width(width);
         ui.painter().layout_job(job)
     };
-    let name = line(&symbol.symbol, 16.0, colors[0], width);
+    let (primary, secondary) = display_text(symbol);
+    let name = line(primary, 16.0, colors[0], width);
     ui.painter().galley(
         Pos2::new(
             left,
@@ -319,12 +353,7 @@ pub(super) fn paint_symbol_text(
         )
     });
     let badge_width = badge.as_ref().map_or(0.0, |badge| badge.size().x + 14.0);
-    let description = line(
-        symbol.description.as_deref().unwrap_or(&symbol.symbol),
-        12.0,
-        colors[1],
-        (width - badge_width).max(0.0),
-    );
+    let description = line(secondary, 12.0, colors[1], (width - badge_width).max(0.0));
     let top = rect.center().y + 3.0;
     let badge_left = left + description.size().x + 6.0;
     let description_height = description.size().y;

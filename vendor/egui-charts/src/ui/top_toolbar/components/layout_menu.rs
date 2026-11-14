@@ -59,6 +59,7 @@ pub enum LayoutAction {
     Rename(String, String),
 }
 
+#[derive(Clone)]
 enum Request {
     List,
     Open(String),
@@ -95,6 +96,7 @@ pub struct LayoutMenu {
     pending: Option<Request>,
     requests: VecDeque<Request>,
     failing: bool,
+    failed_writes: VecDeque<Request>,
     /// The edit count given to `autosave_due` last, and the one saved or opened.
     edits: u64,
     saved_edits: Option<u64>,
@@ -128,6 +130,7 @@ impl LayoutMenu {
             pending: None,
             requests: VecDeque::new(),
             failing: false,
+            failed_writes: VecDeque::new(),
             edits: 0,
             saved_edits: None,
             observed_layout: None,
@@ -161,6 +164,14 @@ impl LayoutMenu {
     }
 
     fn request(&mut self, request: Request) {
+        // A newer user request supersedes a failed attempt at the same operation.
+        // Replaying the old document after a later save would overwrite newer edits.
+        self.failed_writes.retain(|old| !match (&request, old) {
+            (Request::Save(name, _), Request::Save(old, _)) => name == old,
+            (Request::Delete(name), Request::Delete(old)) => name == old,
+            (Request::Rename(from, to, _), Request::Rename(old_from, old_to, _)) => from == old_from && to == old_to,
+            _ => false,
+        });
         self.requests.push_back(request);
         self.send_next();
     }
@@ -316,6 +327,7 @@ impl LayoutMenu {
                             .expect("layout write");
                         let report = answer.is_err() && !self.failing;
                         self.failing = answer.is_err();
+                        if answer.is_err() { self.failed_writes.push_back(request.clone()); }
                         match (request, answer) {
                             (Request::Save(name, _), Ok(())) => self.insert(name),
                             (Request::Rename(old, name, _), Ok(())) => {
@@ -386,6 +398,17 @@ impl LayoutMenu {
         if let Err(at) = self.layouts.binary_search(&name) {
             self.layouts.insert(at, name);
         }
+    }
+
+    /// Whether layout operations are still pending or a write needs a retry.
+    pub fn storage_pending(&self) -> bool {
+        self.pending.is_some() || !self.requests.is_empty() || !self.failed_writes.is_empty()
+    }
+
+    /// Retry previously failed layout writes when the user asks to retry saving.
+    pub fn retry_failed_writes(&mut self) {
+        self.requests.extend(self.failed_writes.drain(..));
+        self.send_next();
     }
 
     /// Call every frame with a count that changes whenever the layout does, such as the sum of

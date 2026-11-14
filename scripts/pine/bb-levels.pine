@@ -1,0 +1,61 @@
+//@version=4
+study(title="BB levels - regular and premarket", shorttitle="BB levels", overlay=true)
+
+// Session times are New York time, regardless of the chart's display timezone.
+// Use intraday bars aligned with 09:30 and 16:00 (for example 1 or 5 minutes).
+// Premarket follows the original script's 00:00-09:30 window.
+ny_hour = hour(time, "America/New_York")
+ny_minute = minute(time, "America/New_York")
+ny_day = dayofmonth(time, "America/New_York")
+ny_month = month(time, "America/New_York")
+ny_year = year(time, "America/New_York")
+newday = ny_day != ny_day[1] or ny_month != ny_month[1] or ny_year != ny_year[1]
+in_pre = ny_hour < 9 or (ny_hour == 9 and ny_minute < 30)
+in_regular = (ny_hour > 9 or (ny_hour == 9 and ny_minute >= 30)) and ny_hour < 16
+
+var float pm_high = na
+var float pm_low = na
+var float dailyhigh = na
+var float dailylow = na
+if newday
+    pm_high := na
+    pm_low := na
+    dailyhigh := na
+    dailylow := na
+if in_pre
+    if na(pm_high) or high > pm_high
+        pm_high := high
+    if na(pm_low) or low < pm_low
+        pm_low := low
+if in_regular
+    if na(dailyhigh) or high > dailyhigh
+        dailyhigh := high
+    if na(dailylow) or low < dailylow
+        dailylow := low
+
+previousdayhigh = security(syminfo.tickerid, 'D', high[1], timezone="America/New_York")
+previousdaylow = security(syminfo.tickerid, 'D', low[1], timezone="America/New_York")
+previousclose = security(syminfo.tickerid, 'D', close[1], timezone="America/New_York")
+td = time - time[5]
+
+plot(dailyhigh, title="Daily high", color=#FFFFFF, linewidth=2, trackprice=true, offset=-9999)
+dh = label.new(x=time+td, y=dailyhigh, text="Daily high", xloc=xloc.bar_time, style=label.style_none, textcolor=#FFFFFF, size=size.normal, textalign=text.align_right)
+label.delete(dh[1])
+plot(dailylow, title="Daily low", color=#8300FF, linewidth=2, trackprice=true, offset=-9999)
+dl = label.new(x=time+td, y=dailylow, text="Daily low", xloc=xloc.bar_time, style=label.style_none, textcolor=#8300FF, size=size.normal, textalign=text.align_right)
+label.delete(dl[1])
+plot(previousdayhigh, title="Yesterday's high", color=#FF6800, linewidth=2, trackprice=true, offset=-9999)
+pdh = label.new(x=time+td, y=previousdayhigh, text="Yesterday's high", xloc=xloc.bar_time, style=label.style_none, textcolor=#FF6800, size=size.normal, textalign=text.align_right)
+label.delete(pdh[1])
+plot(previousdaylow, title="Yesterday's low", color=#00ECFF, linewidth=2, trackprice=true, offset=-9999)
+pdl = label.new(x=time+td, y=previousdaylow, text="Yesterday's low", xloc=xloc.bar_time, style=label.style_none, textcolor=#00ECFF, size=size.normal, textalign=text.align_right)
+label.delete(pdl[1])
+plot(previousclose, title="Yesterday's close", color=#FFFF00, linewidth=2, trackprice=true, offset=-9999, linestyle=plot.linestyle_solid)
+pc = label.new(x=time+td, y=previousclose, text="Yesterday's close", xloc=xloc.bar_time, style=label.style_none, textcolor=#FFFF00, size=size.normal, textalign=text.align_right)
+label.delete(pc[1])
+plot(pm_high, title="Premarket high", color=#16F000, linewidth=2, trackprice=true, offset=-9999)
+pmh = label.new(x=time+td, y=pm_high, text="Premarket high", xloc=xloc.bar_time, style=label.style_none, textcolor=#16F000, size=size.normal, textalign=text.align_right)
+label.delete(pmh[1])
+plot(pm_low, title="Premarket low", color=#FF0000, linewidth=2, trackprice=true, offset=-9999)
+pml = label.new(x=time+td, y=pm_low, text="Premarket low", xloc=xloc.bar_time, style=label.style_none, textcolor=#FF0000, size=size.normal, textalign=text.align_right)
+label.delete(pml[1])

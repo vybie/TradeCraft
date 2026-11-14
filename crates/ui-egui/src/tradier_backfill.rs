@@ -9,6 +9,8 @@ pub fn interval(timeframe: Timeframe) -> Option<Interval> {
         Timeframe::Min5 => Some(Interval::FiveMinutes),
         Timeframe::Min15 => Some(Interval::FifteenMinutes),
         Timeframe::Day1 => Some(Interval::OneDay),
+        Timeframe::Week1 => Some(Interval::OneWeek),
+        Timeframe::Month1 => Some(Interval::OneMonth),
         _ => None,
     }
 }
@@ -44,8 +46,14 @@ fn market_date(time: DateTime<Utc>) -> chrono::NaiveDate {
 }
 
 pub fn slot(clock: &BarClock, interval: Interval, time: DateTime<Utc>) -> DateTime<Utc> {
-    if interval == Interval::OneDay {
-        tradecraft_core::market_day_timestamp(market_date(time))
+    if matches!(
+        interval,
+        Interval::OneDay | Interval::OneWeek | Interval::OneMonth
+    ) {
+        tradecraft_core::market_day_timestamp(tradecraft_core::market_period_date(
+            market_date(time),
+            interval,
+        ))
     } else {
         clock.bar_open(time)
     }
@@ -53,7 +61,10 @@ pub fn slot(clock: &BarClock, interval: Interval, time: DateTime<Utc>) -> DateTi
 
 pub fn partial_start(clock: &BarClock, interval: Interval, cutoff: DateTime<Utc>) -> DateTime<Utc> {
     let point = cutoff - Duration::milliseconds(1);
-    if interval == Interval::OneDay {
+    if matches!(
+        interval,
+        Interval::OneDay | Interval::OneWeek | Interval::OneMonth
+    ) {
         market_date(point)
             .and_hms_opt(0, 0, 0)
             .and_then(|time| {
@@ -66,6 +77,42 @@ pub fn partial_start(clock: &BarClock, interval: Interval, cutoff: DateTime<Utc>
     } else {
         clock.bar_open(point)
     }
+}
+
+/// Rebuild a forming week/month from finished daily candles and the current day's complete minutes.
+pub fn reconcile_calendar(
+    history: Vec<Bar>,
+    daily: Vec<Bar>,
+    minutes: Vec<Bar>,
+    clock: &BarClock,
+    interval: Interval,
+    cutoff: DateTime<Utc>,
+) -> Vec<Bar> {
+    let target_time = cutoff - Duration::milliseconds(1);
+    let target = slot(clock, interval, target_time);
+    let current_date = market_date(target_time);
+    let mut parts: Vec<Bar> = daily
+        .into_iter()
+        .filter(|b| market_date(b.time) < current_date && slot(clock, interval, b.time) == target)
+        .collect();
+    parts.extend(minutes.into_iter().filter(|b| {
+        market_date(b.time) == current_date
+            && b.time + Duration::minutes(1) <= cutoff
+            && slot(clock, interval, b.time) == target
+    }));
+    parts.sort_by_key(|b| b.time);
+    let mut output = completed(history, clock, interval, target_time);
+    if let Some(first) = parts.first() {
+        let mut aggregate = Bar::new(target, first.open, first.high, first.low, first.close, 0.0);
+        for part in parts {
+            aggregate.high = aggregate.high.max(part.high);
+            aggregate.low = aggregate.low.min(part.low);
+            aggregate.close = part.close;
+            aggregate.volume += part.volume;
+        }
+        output.push(aggregate);
+    }
+    output
 }
 
 /// Complete bars before the current slot are safe to replace without touching newer stream ticks.
@@ -138,6 +185,72 @@ pub fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn weekly_and_monthly_recovery_joins_completed_days_and_current_minutes() {
+        let time = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        for interval in [Interval::OneWeek, Interval::OneMonth] {
+            let clock = BarClock::new(if interval == Interval::OneWeek {
+                Timeframe::Week1
+            } else {
+                Timeframe::Month1
+            });
+            let daily = vec![
+                Bar::new(
+                    time("2026-11-09T14:30:00Z"),
+                    100.0,
+                    105.0,
+                    99.0,
+                    103.0,
+                    50.0,
+                ),
+                Bar::new(
+                    time("2026-11-10T14:30:00Z"),
+                    103.0,
+                    107.0,
+                    102.0,
+                    106.0,
+                    70.0,
+                ),
+            ];
+            let minutes = vec![
+                Bar::new(
+                    time("2026-11-11T14:30:00Z"),
+                    106.0,
+                    109.0,
+                    105.0,
+                    108.0,
+                    10.0,
+                ),
+                Bar::new(
+                    time("2026-11-11T14:31:00Z"),
+                    108.0,
+                    110.0,
+                    107.0,
+                    109.0,
+                    20.0,
+                ),
+            ];
+            let bars = reconcile_calendar(
+                vec![],
+                daily,
+                minutes,
+                &clock,
+                interval,
+                time("2026-11-11T14:32:00Z"),
+            );
+            assert_eq!(bars.len(), 1);
+            assert_eq!(
+                (
+                    bars[0].open,
+                    bars[0].high,
+                    bars[0].low,
+                    bars[0].close,
+                    bars[0].volume
+                ),
+                (100.0, 110.0, 99.0, 109.0, 150.0)
+            );
+        }
+    }
     #[test]
     fn backfill_reconciles_only_completed_minutes_and_preserves_volume() {
         let clock = BarClock::new(Timeframe::Min5);

@@ -33,19 +33,21 @@ pub(crate) fn paint_price_lines(
         return;
     };
     let rect = painter.clip_rect();
-    let paint = |value, color| {
+    let paint = |value, color, solid| {
         let y = price.price_to_y(value);
         if !y.is_finite() || !rect.y_range().contains(y) || color == egui::Color32::TRANSPARENT {
             return;
         }
-        crate::painting::dashed_line::draw_dashed_line(
+        if solid {
+            painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(1.0, color));
+        } else { crate::painting::dashed_line::draw_dashed_line(
             painter,
             egui::pos2(rect.left(), y),
             egui::pos2(rect.right(), y),
             egui::Stroke::new(1.0, color),
             1.0,
             3.0,
-        );
+        ); }
     };
     for line in 0..study.line_count() {
         let style = study.plot_style(line);
@@ -68,11 +70,11 @@ pub(crate) fn paint_price_lines(
         };
         let color = plot_value_color(study, line, bar.checked_add_signed(study.plot_offset(line)))
             .unwrap_or(style.color);
-        paint(value, color);
+        paint(value, color, study.plot_price_line_solid(line));
     }
     for (index, (value, ..)) in study.pane().levels.into_iter().enumerate() {
         if let Some(color) = study.level_price_line(index) {
-            paint(value, color);
+            paint(value, color, false);
         }
     }
 }
@@ -214,15 +216,18 @@ pub(crate) fn paint_candles(
         if let Some((body, wick)) =
             candle_geometry(candle, coords, bar_spacing, |p| price.price_to_y(p))
         {
-            let stroke = egui::Stroke::new(style.width, style.color);
+            let color = candle.color.unwrap_or(style.color);
+            let stroke = egui::Stroke::new(style.width, color);
             painter.line_segment(wick, stroke);
-            painter.rect(
-                body,
-                0.0,
-                style.color.gamma_multiply_u8(77),
-                stroke,
-                egui::StrokeKind::Inside,
-            );
+            if candle.bar_style {
+                let center = body.center().x;
+                let open = price.price_to_y(candle.bar.open);
+                let close = price.price_to_y(candle.bar.close);
+                painter.line_segment([egui::pos2(body.left(), open), egui::pos2(center, open)], stroke);
+                painter.line_segment([egui::pos2(center, close), egui::pos2(body.right(), close)], stroke);
+            } else {
+                painter.rect(body, 0.0, color.gamma_multiply_u8(77), stroke, egui::StrokeKind::Inside);
+            }
         }
     }
 }
@@ -319,9 +324,11 @@ pub(crate) fn mapped_drawings(
         .filter(|drawing| drawing.visible)
         .map(|drawing| {
             let mut drawing = drawing.clone();
-            drawing.color = style.color.to_srgba_unmultiplied();
-            drawing.stroke_width = style.width;
-            drawing.line_style = style.pattern;
+            if !study.keeps_drawing_style() {
+                drawing.color = style.color.to_srgba_unmultiplied();
+                drawing.stroke_width = style.width;
+                drawing.line_style = style.pattern;
+            }
             drawing.update_screen_coords(|bar: f32| coords.index_to_x(f64::from(bar)), &price_to_y);
             drawing
         })

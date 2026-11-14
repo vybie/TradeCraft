@@ -1570,6 +1570,8 @@ impl Chart {
                 &time_coords,
                 time_coords.start_idx,
                 color,
+                self.config.post_market_color,
+                self.config.overnight_color,
             );
             (shaded, color)
         } else {
@@ -3164,9 +3166,9 @@ impl Chart {
             .zip(self.rendered_studies().indicators())
             .filter(|(id, study)| study.is_visible() && self.series_pane(**id) == Some(main_pane))
         {
-            if let Some(table) = study.table() {
+            for (index, table) in study.tables().into_iter().enumerate() {
                 table_rect.max.y =
-                    crate::studies::table::paint(ui, table_rect, table, ui.scope_id().with(id))
+                    crate::studies::table::paint(ui, table_rect, table, ui.scope_id().with((id, index)))
                         .top()
                         - 8.0;
             }

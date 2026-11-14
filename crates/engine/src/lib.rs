@@ -396,12 +396,16 @@ impl Engine {
 /// Apply a market update to a candle without depending on a chart widget.
 pub fn candle_for_trade(previous: Option<&Bar>, interval: Interval, trade: &Trade) -> Option<Bar> {
     let trade_time = DateTime::<Utc>::from_timestamp_millis(trade.timestamp_ms)?;
-    let time = if interval == Interval::OneDay {
-        market_day_timestamp(
+    let time = if matches!(
+        interval,
+        Interval::OneDay | Interval::OneWeek | Interval::OneMonth
+    ) {
+        market_day_timestamp(tradecraft_core::market_period_date(
             trade_time
                 .with_timezone(&chrono_tz::America::New_York)
                 .date_naive(),
-        )
+            interval,
+        ))
     } else {
         let seconds = trade
             .timestamp_ms
@@ -433,6 +437,33 @@ pub fn candle_for_trade(previous: Option<&Bar>, interval: Interval, trade: &Trad
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weekly_and_monthly_trades_follow_new_york_calendar_periods() {
+        let trade = |s: &str| Trade {
+            timestamp_ms: DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis(),
+            price: 100.0,
+            size: 1.0,
+        };
+        let monday = trade("2026-11-09T15:00:00Z");
+        let friday = trade("2026-11-13T15:00:00Z");
+        let next_week = trade("2026-11-16T15:00:00Z");
+        let a = candle_for_trade(None, Interval::OneWeek, &monday).unwrap();
+        let b = candle_for_trade(Some(&a), Interval::OneWeek, &friday).unwrap();
+        let c = candle_for_trade(Some(&b), Interval::OneWeek, &next_week).unwrap();
+        assert_eq!(a.time, b.time);
+        assert_ne!(b.time, c.time);
+        let month = candle_for_trade(None, Interval::OneMonth, &monday).unwrap();
+        let same_month = candle_for_trade(Some(&month), Interval::OneMonth, &next_week).unwrap();
+        let december = candle_for_trade(
+            Some(&same_month),
+            Interval::OneMonth,
+            &trade("2026-12-01T15:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(month.time, same_month.time);
+        assert_ne!(same_month.time, december.time);
+    }
 
     #[test]
     fn commands_update_candles_without_a_ui() {

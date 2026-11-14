@@ -1,8 +1,8 @@
 # TradeCraft roadmap
 
-TradeCraft is a native Rust charting app inspired by TradingView and the Craft apps. The near-term goal is a useful, dependable charting workspace for US stocks and indices, with configurable indicators and a familiar full-window interface.
+TradeCraft is an independent native Rust charting app. The near-term goal is a useful, dependable charting workspace for US stocks and indices, with configurable indicators and a full-window interface.
 
-This is a working plan, not a promise of TradingView feature parity. Check items only after implementation and verification. The current workspace contains local changes beyond the published v0.1.0 preview; see [ARCHITECTURE.md](ARCHITECTURE.md) for the architecture audit and open issues.
+This is a working plan. Check items only after implementation and verification. The current workspace contains local changes beyond the published v0.1.0 preview; see [ARCHITECTURE.md](ARCHITECTURE.md) for the architecture audit and open issues.
 
 ## Current baseline
 
@@ -18,7 +18,7 @@ This is a working plan, not a promise of TradingView feature parity. Check items
 
 **Goal:** Make the indicators the user relies on easy to configure and reuse.
 
-- [ ] **M1.1** Add TradingView-style settings for each existing indicator: edit its parameters after adding it, change supported colors and line widths, show/hide it, and remove it without accidentally deleting it when opening settings.
+- [ ] **M1.1** Add settings for each existing indicator: edit its parameters after adding it, change supported colors and line widths, show/hide it, and remove it without accidentally deleting it when opening settings.
 - [ ] **M1.2** Make it straightforward to use multiple SMA and EMA instances, including periods 13, 21, 50, 100, and 200, with independent settings. These are useful presets, not fixed limits.
 - [ ] **M1.3** Improve the Indicators picker: find an indicator by name and distinguish available indicators from those already on the chart.
 - [ ] **M1.4** Verify RSI and MACD pane placement, labels, scaling, and interaction against their intended behavior; fix gaps found. Keep overlays such as moving averages and Bollinger Bands on the price chart.
@@ -51,11 +51,11 @@ This is a working plan, not a promise of TradingView feature parity. Check items
 
 **Done when:** Reconnect and gap recovery are tested, freshness is accurately shown, and the documented provider limitations are visible rather than hidden.
 
-## M4 — TradingView-style window and chart interaction
+## M4 — Window and chart interaction
 
 **Goal:** Make the whole window and everyday chart controls feel familiar and coherent.
 
-- [ ] **M4.1** Compare the full window against TradingView: toolbar, chart header, right sidebar, status bar, spacing, icons, and menus. Refine the native UI without copying proprietary assets.
+- [ ] **M4.1** Review the full window: toolbar, chart header, right sidebar, status bar, spacing, icons, and menus. Refine the native UI for a coherent TradeCraft experience.
 - [ ] **M4.2** Improve symbol search, switching intervals and chart styles, and active-state feedback. Add common intervals as supported and tested by the selected data provider.
 - [ ] **M4.3** Improve crosshair, OHLC/volume readouts, zoom, pan, time and price scales, and reset-to-view behavior; verify mouse and keyboard interaction.
 - [ ] **M4.4** Improve the watchlist workflow and decide how to show quotes for multiple symbols within each provider's connection and rate limits.

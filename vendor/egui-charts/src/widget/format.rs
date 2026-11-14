@@ -225,6 +225,11 @@ impl Chart {
         self.time_formatter = formatter;
     }
 
+    /// Returns the host-supplied time formatter, if any.
+    pub fn time_formatter(&self) -> Option<std::sync::Arc<dyn crate::scales::TimeFormatter>> {
+        self.time_formatter.clone()
+    }
+
     /// Formats price scale labels in the normal and logarithmic modes: the crosshair label and
     /// price tags with [`PriceFormatter::format`], and the axis ticks with
     /// [`PriceFormatter::format_ticks`], which receives the complete ordered list for each

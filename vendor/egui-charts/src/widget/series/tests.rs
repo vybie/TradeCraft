@@ -313,7 +313,7 @@ fn bar_updates_obey_live_edge_policies() {
     for (replace, rolling) in [(false, false), (true, false), (true, true)] {
         for shift in [false, true] {
             for allow_whitespace in [false, true] {
-                for offset in [19.0, -1.5, -2.0, -30.0] {
+                for offset in [40.0, 19.0, 5.0, -1.5, -2.0, -30.0] {
                     for (name, old_whitespace, new_whitespace, close, append) in [
                         ("close rises", false, false, 11.0, false),
                         ("close falls", false, false, 9.0, false),
@@ -363,7 +363,7 @@ fn bar_updates_obey_live_edge_policies() {
                             && offset >= -1.5
                             && (append || old_whitespace && !new_whitespace && allow_whitespace);
                         let expected = if follow {
-                            20.0
+                            offset
                         } else if append {
                             offset - 1.0
                         } else {
