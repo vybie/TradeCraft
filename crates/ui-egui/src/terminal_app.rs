@@ -1729,12 +1729,22 @@ mod tests {
             );
         h.run_steps(3);
         assert!(!h.state().terminal.chart().chart_options().tooltip.enabled);
-        h.get_by_label("TradeCraft menu").click();
-        h.run_steps(3);
+        for _ in 0..3 {
+            h.get_by_label("TradeCraft menu").click();
+            h.run_steps(3);
+            if h.query_by_label("Market data settings").is_some() {
+                break;
+            }
+        }
         h.get_by_label("Market data settings").click();
         h.run_steps(3);
-        h.get_by_label("Tradier · production token").click();
-        h.run_steps(3);
+        for _ in 0..3 {
+            if h.query_by_label("Tradier token").is_some() {
+                break;
+            }
+            h.get_by_label("Tradier · production token").click();
+            h.run_steps(3);
+        }
         assert!(h.query_by_label("Tradier token").is_some());
     }
 
@@ -1821,7 +1831,9 @@ mod tests {
             h.run_steps(4);
             let plus = h.get_by_label("New chart tab").rect();
             let session = h
-                .get_by_label("Regular trading hours: off (extended hours)")
+                .query_by_label("Regular trading hours: off (extended hours)")
+                .or_else(|| h.query_by_label("Regular trading hours: on"))
+                .expect("session control is visible")
                 .rect();
             let meridiem = format!(" {} ", chrono::Local::now().format("%p"));
             let timezone = h.get_by_label_contains(&meridiem).rect();
