@@ -22,4 +22,6 @@ Both strict macOS target checks reported missing license texts for `block2 0.6.2
 
 The exact objc2 source revisions are now accessible and confirm their stated license choices, but full copyright notices for the newer packages are still unverified. Upstream also flags an Apple SDK-derived code distribution question. Do not treat the macOS notice or distribution review as complete until these and the `dispatch` notice are resolved.
 
+The GitHub Mac test run failed the market-data settings UI test. It is run and reported separately without blocking packaging; the cause and real Mac interaction still need verification. The remaining provider and UI tests continue to gate the macOS build.
+
 The 0.3.0 release notes are in `RELEASE-NOTES-0.3.0.md`; verify them against the final artifact before publishing.
