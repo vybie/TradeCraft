@@ -76,7 +76,7 @@ impl IndicatorCategory {
     pub fn name(&self) -> &'static str {
         match self {
             IndicatorCategory::Favorites => "Favorites",
-            IndicatorCategory::MyScripts => "My scripts",
+            IndicatorCategory::MyScripts => "Custom Pine",
             IndicatorCategory::BuiltIns => "Built-ins",
             IndicatorCategory::Community => "Community",
             IndicatorCategory::Premium => "Premium",

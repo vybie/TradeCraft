@@ -12,15 +12,19 @@
 )]
 
 mod terminal_app;
+mod pine_engine;
+mod pine_editor;
 mod terminal_feed;
 mod terminal_storage;
 mod tradier_backfill;
 mod tradier_hub;
+mod tradier_watchlist;
 mod ui;
+mod window_settings;
 use chrono::{DateTime, Utc};
 use egui_charts::{
     model::{Bar, BarData, Timeframe},
-    scales::{DefaultTimeFormatter, TimezoneMode},
+    scales::{DefaultTimeFormatter, TickMarkType, TimeFormatter, TimezoneMode},
     widget::{Chart, SeriesId},
 };
 use market::Event;
@@ -29,6 +33,37 @@ use std::sync::mpsc;
 use tradecraft_core::{Interval, Trade};
 use tradecraft_engine::{Indicator, WorkspaceCommand};
 use tradecraft_providers::{market, settings};
+
+#[derive(Clone)]
+struct ChartTimeFormatter;
+
+impl TimeFormatter for ChartTimeFormatter {
+    fn format(&self, time: DateTime<Utc>, kind: TickMarkType) -> String {
+        match kind {
+            TickMarkType::DayOfMonth | TickMarkType::Month => time.format("%b %-d").to_string(),
+            TickMarkType::Year => time.format("%b %-d, %Y").to_string(),
+            _ => self.default_formatter().format(time, kind),
+        }
+    }
+
+    fn format_crosshair(&self, time: DateTime<Utc>, bar_seconds: i64) -> String {
+        self.default_formatter().format_crosshair(time, bar_seconds)
+    }
+
+    fn clone_box(&self) -> Box<dyn TimeFormatter> {
+        Box::new(self.clone())
+    }
+}
+
+impl ChartTimeFormatter {
+    fn default_formatter(&self) -> DefaultTimeFormatter {
+        DefaultTimeFormatter {
+            use_24_hour: false,
+            show_seconds: false,
+            date_format: None,
+        }
+    }
+}
 
 struct TradeCraft {
     symbol: String,
@@ -69,11 +104,7 @@ impl TradeCraft {
         let mut options = chart.chart_options().clone();
         options.time_scale.timezone = TimezoneMode::Local;
         chart.set_chart_options(options);
-        chart.set_time_formatter(Some(std::sync::Arc::new(DefaultTimeFormatter {
-            use_24_hour: false,
-            show_seconds: false,
-            date_format: None,
-        })));
+        chart.set_time_formatter(Some(std::sync::Arc::new(ChartTimeFormatter)));
         Self {
             symbol: "SPX".into(),
             active_symbol: String::new(),
@@ -299,6 +330,8 @@ fn chart_timeframe(interval: Interval) -> Timeframe {
         Interval::FiveMinutes => Timeframe::Min5,
         Interval::FifteenMinutes => Timeframe::Min15,
         Interval::OneDay => Timeframe::Day1,
+        Interval::OneWeek => Timeframe::Week1,
+        Interval::OneMonth => Timeframe::Month1,
     }
 }
 pub fn run() -> eframe::Result {
@@ -339,11 +372,12 @@ pub fn run() -> eframe::Result {
         check_live();
         return Ok(());
     }
+    let window_settings = window_settings::WindowSettings::load();
     eframe::run_native(
         "TradeCraft",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1200.0, 760.0])
+            viewport: window_settings
+                .viewport()
                 .with_min_inner_size([640.0, 480.0])
                 .with_icon(std::sync::Arc::new(egui::IconData {
                     rgba: include_bytes!("../../../apps/tradecraft/assets/tradecraft-64.rgba")
@@ -353,7 +387,11 @@ pub fn run() -> eframe::Result {
                 })),
             ..Default::default()
         },
-        Box::new(|_| Ok(Box::new(terminal_app::TerminalApp::new()))),
+        Box::new(move |cc| {
+            let mut app = terminal_app::TerminalApp::new_with_window_settings(window_settings);
+            app.init_tray(&cc.egui_ctx);
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -492,6 +530,23 @@ fn check_live() {
 #[cfg(test)]
 mod chart_tests {
     use super::*;
+    #[test]
+    fn chart_date_boundaries_show_local_month_and_day() {
+        let formatter = egui_charts::scales::TimeFormatterBuilder::new()
+            .with_formatter(Box::new(ChartTimeFormatter))
+            .with_timezone(TimezoneMode::Timezone("America/Los_Angeles".parse().unwrap()))
+            .build();
+        let instant = DateTime::parse_from_rfc3339("2026-11-13T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(formatter.format(instant, TickMarkType::DayOfMonth), "Nov 13");
+        assert_eq!(formatter.format(instant, TickMarkType::Time), "12:00 AM");
+        assert_eq!(formatter.format(instant, TickMarkType::Year), "Nov 13, 2026");
+        assert_eq!(
+            formatter.format(instant - chrono::Duration::minutes(1), TickMarkType::DayOfMonth),
+            "Nov 12"
+        );
+    }
     #[test]
     fn trades_update_the_current_bar_and_open_the_next() {
         let mut app = TradeCraft::new();

@@ -747,7 +747,6 @@ impl<'a> Legend<'a> {
                             bounds.width(),
                         );
                     }
-                    let study_colors = study.colors();
                     let precision = study.precision().or_else(|| {
                         (study.value_format() == crate::scales::StudyFormat::Price)
                             .then_some(precision)
@@ -757,7 +756,14 @@ impl<'a> Legend<'a> {
                             && study.is_visible()
                             && study.legend_visible(*index)
                     }) {
-                        let value = study.plot_value(index, self.bar_index).unwrap_or(f64::NAN);
+                        let displayed = study.plot_value(index, self.bar_index);
+                        let using_source = displayed.is_none() && study.plot_price_line(index) && study.plot_offset(index) != 0;
+                        let value = displayed.or_else(|| {
+                            // A tracked line may deliberately move its plot off-screen. Show the
+                            // underlying value at the selected bar when that plot is unavailable.
+                            using_source
+                                .then(|| study.values().value(index, self.bar_index)).flatten()
+                        }).unwrap_or(f64::NAN);
                         let text = if value.is_finite() {
                             if study.value_format() == crate::scales::StudyFormat::Price {
                                 crate::scales::group_thousands(
@@ -768,16 +774,16 @@ impl<'a> Legend<'a> {
                                 study.format_plot_value(index, value)
                             }
                         } else {
-                            "∅".to_owned()
+                            "-".to_owned()
                         };
                         // A fully transparent plot colour holds no RGB, so it has no opaque form.
-                        let color = crate::chart::indicators::plots::plot_value_color(
-                            study.as_ref(),
-                            index,
-                            Some(self.bar_index),
-                        )
+                        let color = if using_source {
+                            study.plot_color(index, self.bar_index)
+                        } else {
+                            crate::chart::indicators::plots::plot_value_color(study.as_ref(), index, Some(self.bar_index))
+                        }
                         .filter(|color| color.a() != 0)
-                        .or_else(|| study_colors.get(index).copied())
+                        .or_else(|| Some(study.plot_style(index).color))
                         .filter(|color| color.a() != 0)
                         .map_or(colors.text, |color| color.to_opaque());
                         layout.text(text, theme.text.ohlc, color, bounds.width());

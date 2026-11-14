@@ -191,6 +191,8 @@ impl OrderFlowStudy {
                                 bars: at..at + 1,
                                 bar: Bar::new(data[at].time, open, high, low, close, 0.0),
                                 plot,
+                                color: None,
+                                bar_style: false,
                             });
                         }
                         last = Some((key, close));

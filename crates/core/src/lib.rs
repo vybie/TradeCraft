@@ -11,7 +11,7 @@
     )
 )]
 
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, TimeZone, Utc};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bar {
@@ -56,6 +56,8 @@ pub enum Interval {
     FiveMinutes,
     FifteenMinutes,
     OneDay,
+    OneWeek,
+    OneMonth,
 }
 impl Interval {
     pub fn label(self) -> &'static str {
@@ -64,6 +66,8 @@ impl Interval {
             Self::FiveMinutes => "5m",
             Self::FifteenMinutes => "15m",
             Self::OneDay => "1D",
+            Self::OneWeek => "1W",
+            Self::OneMonth => "1M",
         }
     }
     pub fn seconds(self) -> i64 {
@@ -72,7 +76,22 @@ impl Interval {
             Self::FiveMinutes => 300,
             Self::FifteenMinutes => 900,
             Self::OneDay => 86_400,
+            Self::OneWeek => 7 * 86_400,
+            Self::OneMonth => 32 * 86_400,
         }
+    }
+}
+
+/// Start of the trading day, week, or calendar month containing a New York date.
+pub fn market_period_date(date: NaiveDate, interval: Interval) -> NaiveDate {
+    match interval {
+        Interval::OneWeek => date
+            .checked_sub_signed(chrono::Duration::days(i64::from(
+                date.weekday().num_days_from_monday(),
+            )))
+            .unwrap_or(date),
+        Interval::OneMonth => date.with_day(1).unwrap_or(date),
+        _ => date,
     }
 }
 

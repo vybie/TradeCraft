@@ -145,6 +145,9 @@ pub struct SessionConfig {
     pub premarket_start: Option<String>,
     /// Post-market end time (e.g., "20:00")
     pub postmarket_end: Option<String>,
+    /// Date-specific market hours, when supplied by the data provider.
+    #[serde(default)]
+    pub overrides: Vec<crate::model::SessionOverride>,
 }
 
 impl Default for SessionConfig {
@@ -163,6 +166,7 @@ impl Default for SessionConfig {
             show_postmarket: false,
             premarket_start: Some("04:00".to_string()),
             postmarket_end: Some("20:00".to_string()),
+            overrides: Vec::new(),
         }
     }
 }
@@ -188,6 +192,7 @@ impl SessionConfig {
             show_postmarket: false,
             premarket_start: None,
             postmarket_end: None,
+            overrides: Vec::new(),
         }
     }
 
@@ -206,6 +211,7 @@ impl SessionConfig {
             show_postmarket: false,
             premarket_start: None,
             postmarket_end: None,
+            overrides: Vec::new(),
         }
     }
 
@@ -219,6 +225,7 @@ impl SessionConfig {
             show_postmarket: false,
             premarket_start: None,
             postmarket_end: None,
+            overrides: Vec::new(),
         }
     }
 
@@ -237,6 +244,7 @@ impl SessionConfig {
             show_postmarket: false,
             premarket_start: None,
             postmarket_end: None,
+            overrides: Vec::new(),
         }
     }
 }
@@ -439,6 +447,12 @@ pub struct ChartConfig {
     pub show_extended_hours: bool,
     /// Extended-hours fill. `PLACEHOLDER` uses the active theme accent at low opacity.
     pub extended_hours_color: Color32,
+    /// Optional distinct fill for post-market bars; absent uses `extended_hours_color`.
+    #[serde(default)]
+    pub post_market_color: Option<Color32>,
+    /// Optional fill for overnight bars between the post- and pre-market sessions.
+    #[serde(default)]
+    pub overnight_color: Option<Color32>,
     /// Whether to show the symbol watermark.
     pub show_watermark: bool,
     /// Text of the symbol watermark; `\n` starts another line. `None` shows the symbol and the
@@ -591,6 +605,8 @@ impl Default for ChartConfig {
             session_config: None,
             show_extended_hours: true,
             extended_hours_color: Color32::PLACEHOLDER,
+            post_market_color: None,
+            overnight_color: None,
             // Watermark disabled by default
             show_watermark: false,
             watermark_text: None,

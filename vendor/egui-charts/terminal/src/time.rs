@@ -73,7 +73,7 @@ impl Terminal {
 
     pub(super) fn time_show(&mut self, ui: &mut egui::Ui, region: Region) {
         match region {
-            Region::Bottom => {
+            Region::Bottom if !self.time_controls_in_tabs => {
                 let bg = ui.style().visuals.panel_fill;
                 egui::Panel::bottom("egui_charts_terminal_bar")
                     .exact_size(39.0)
@@ -91,6 +91,13 @@ impl Terminal {
             }
             Region::Windows => self.show_time_windows(&ui.ctx().clone()),
             _ => {}
+        }
+    }
+
+    pub(super) fn time_show_tab_controls(&mut self, ui: &mut egui::Ui) {
+        let action = self.time.bar.show_clock_and_session(ui);
+        if action != TimeframeToolbarAction::None {
+            self.emit(Action::BottomBar(action));
         }
     }
 
@@ -428,10 +435,27 @@ fn chart_zone(chart: &Chart) -> Option<TimezoneId> {
 }
 
 fn zone_name(chart: &Chart) -> String {
-    chart_zone(chart).map_or_else(
-        || chrono::Local::now().offset().to_string(),
-        |zone| zone.name().to_owned(),
-    )
+    chart_zone(chart).map_or_else(local_zone_name, |zone| zone.name().to_owned())
+}
+
+fn local_zone_name() -> String {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static ZONE: OnceLock<Mutex<(Instant, String)>> = OnceLock::new();
+    fn resolve() -> String {
+        iana_time_zone::get_timezone()
+            .ok()
+            .filter(|zone| zone.parse::<TimezoneId>().is_ok())
+            .unwrap_or_else(|| chrono::Local::now().offset().to_string())
+    }
+    let cache = ZONE.get_or_init(|| Mutex::new((Instant::now(), resolve())));
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cached.0.elapsed() >= Duration::from_secs(60) {
+        *cached = (Instant::now(), resolve());
+    }
+    cached.1.clone()
 }
 
 /// The first instant of `date` in the chart's time zone.

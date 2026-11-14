@@ -162,6 +162,88 @@ impl TimeframeToolbar {
             .show(ui, |ui, _ctx| self.show_contents(ui))
     }
 
+    /// Space needed for the clock and session controls when hosted in another toolbar.
+    pub fn clock_and_session_width(&self, ui: &Ui) -> f32 {
+        let mut width = 2.0 * ui.active_theme().spacing.lg;
+        if !self.hidden.contains(&Control::TimeZone) {
+            width +=
+                self.text_btn_width(ui, &self.formatted_clock()) + ui.active_theme().spacing.lg;
+        }
+        if !self.hidden.contains(&Control::Session) {
+            width += self.text_btn_width(ui, self.state.session_type.label());
+        }
+        width
+    }
+
+    /// Clock and daylight-saving-aware zone abbreviation for the selected chart zone.
+    pub fn formatted_clock(&self) -> String {
+        #[cfg(feature = "timezones")]
+        if let Ok(zone) = self.state.timezone.parse::<chrono_tz::Tz>() {
+            return match self.state.curr_time {
+                Some(time) => time
+                    .with_timezone(&zone)
+                    .format("%-I:%M:%S %p %Z")
+                    .to_string(),
+                None => format!("--:--:-- {zone}"),
+            };
+        }
+        let zone = self
+            .state
+            .timezone
+            .parse::<crate::model::TimezoneId>()
+            .unwrap_or(crate::model::TimezoneId::utc());
+        match self.state.curr_time {
+            Some(time) => format!(
+                "{} {}",
+                time.with_timezone(&zone).format("%-I:%M:%S %p"),
+                if zone.name() == "UTC" {
+                    "UTC".to_owned()
+                } else {
+                    format!("UTC{zone}")
+                }
+            ),
+            None => format!("--:--:-- {zone}"),
+        }
+    }
+
+    /// Renders the existing timezone and session controls without date ranges or navigation.
+    pub fn show_clock_and_session(&mut self, ui: &mut Ui) -> TimeframeToolbarAction {
+        follow_active_theme(
+            ui.ctx(),
+            &mut self.config_theme,
+            &mut self.config,
+            TimeframeToolbarConfig::from_theme,
+        );
+        self.state.update_time();
+        if !self.hidden.contains(&Control::TimeZone) {
+            let nanos = self.state.curr_time.unwrap().timestamp_subsec_nanos();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_nanos(
+                    1_000_000_000 - u64::from(nanos),
+                ));
+        }
+        let mut action = TimeframeToolbarAction::None;
+        ui.horizontal_centered(|ui| {
+            if !self.hidden.contains(&Control::TimeZone) {
+                self.clock_label(ui, &self.formatted_clock());
+                ui.space_lg();
+            }
+            if !self.hidden.contains(&Control::Session)
+                && self
+                    .text_btn(
+                        ui,
+                        self.state.session_type.label(),
+                        self.state.session_type.tooltip(),
+                        self.state.session_type == SessionType::RTH,
+                    )
+                    .clicked()
+            {
+                action = TimeframeToolbarAction::OpenSessionMenu;
+            }
+        });
+        action
+    }
+
     /// Internal: render toolbar contents
     fn show_contents(&mut self, ui: &mut Ui) -> TimeframeToolbarAction {
         let mut result_action = TimeframeToolbarAction::None;
@@ -176,7 +258,7 @@ impl TimeframeToolbar {
                 .iter()
                 .map(|range| self.range_btn_width(ui, range.label()))
                 .sum();
-            let mut time_text = self.state.formatted_time();
+            let mut time_text = self.formatted_clock();
             let mut reserved = ui.active_theme().spacing.lg;
             if !self.hidden.contains(&Control::TimeZone) {
                 reserved += self.text_btn_width(ui, &time_text) + ui.active_theme().spacing.lg;
@@ -193,7 +275,12 @@ impl TimeframeToolbar {
                 self.range_btn_width(ui, "Ranges") + reserved + 48.0 > ui.available_width();
             if compact && !self.hidden.contains(&Control::TimeZone) {
                 reserved -= self.text_btn_width(ui, &time_text);
-                time_text.truncate(8);
+                // Keep the zone visible on narrow toolbars; only omit clock seconds.
+                if let Some(end) = time_text.find(' ')
+                    && let Some(seconds) = time_text[..end].rfind(':')
+                {
+                    time_text.replace_range(seconds..end, "");
+                }
                 reserved += self.text_btn_width(ui, &time_text);
             }
             if ranges_width + reserved + 48.0 > ui.available_width() {
@@ -253,21 +340,7 @@ impl TimeframeToolbar {
             // Right section: Timezone, Session, Dividends
             // Timezone button with time
             if !self.hidden.contains(&Control::TimeZone) {
-                if self
-                    .text_btn(
-                        ui,
-                        &time_text,
-                        &l10n::format_text(
-                            ui.ctx(),
-                            "Timezone: {zone}",
-                            &[("zone", self.state.timezone.as_str())],
-                        ),
-                        false,
-                    )
-                    .clicked()
-                {
-                    result_action = TimeframeToolbarAction::OpenTimezoneMenu;
-                }
+                self.clock_label(ui, &time_text);
                 ui.space_lg();
             }
 
@@ -374,6 +447,29 @@ impl TimeframeToolbar {
     fn text_btn_width(&self, ui: &Ui, text: &str) -> f32 {
         self.range_btn_width(ui, text)
             .max(DESIGN_TOKENS.sizing.button_md)
+    }
+
+    fn clock_label(&self, ui: &mut Ui, text: &str) {
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(
+                self.text_btn_width(ui, text),
+                self.config.panel_height - ui.active_theme().spacing.sm,
+            ),
+            Sense::hover(),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(self.config.font_size),
+            self.config.text_color,
+        );
+        response.widget_info(|| {
+            let mut info =
+                egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), "Chart time");
+            info.current_text_value = Some(text.to_owned());
+            info
+        });
     }
 
     fn text_btn(&self, ui: &mut Ui, text: &str, tooltip: &str, is_active: bool) -> Response {
@@ -633,8 +729,14 @@ mod tests {
                 } else if !toolbar.hidden.contains(&Control::Session) {
                     toolbar.state.session_type.label().to_owned()
                 } else {
-                    toolbar.state.formatted_time()
+                    toolbar.formatted_clock()
                 };
+                let mut compact_last = last.clone();
+                if let Some(end) = compact_last.find(' ')
+                    && let Some(seconds) = compact_last[..end].rfind(':')
+                {
+                    compact_last.replace_range(seconds..end, "");
+                }
                 // The clock also has a trailing gap when it is the last control.
                 let padding = crate::theme::Theme::default().spacing.lg
                     * if toolbar.hidden.contains(&Control::Session)
@@ -663,7 +765,7 @@ mod tests {
                     .iter()
                     .find_map(|shape| match &shape.shape {
                         egui::Shape::Text(text)
-                            if text.galley.text() == last
+                            if text.galley.text() == last || text.galley.text() == compact_last
                                 || last.starts_with(&format!("{} ", text.galley.text())) =>
                         {
                             Some(text)

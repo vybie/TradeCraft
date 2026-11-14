@@ -111,7 +111,7 @@ impl Chart {
         text: &str,
         factory: &crate::studies::IndicatorFactory,
     ) -> Result<SeriesId, crate::studies::StudyError> {
-        use crate::studies::{Indicator, RefusedStudy, StudyError};
+        use crate::studies::{Indicator, StudyError};
         let json = text
             .strip_prefix(STUDY_PREFIX)
             .ok_or(StudyError::NotClipboard)?;
@@ -136,10 +136,7 @@ impl Chart {
         study.set_overlay(copied.overlay);
         study.set_scale(copied.scale);
         let study: Box<dyn Indicator> = Box::new(study);
-        if self.study_limit_reached() {
-            return Err(StudyError::StudyLimitReached(RefusedStudy::new(study)));
-        }
-        Ok(self.user_action(|chart| chart.add_indicator(study)))
+        self.user_action(|chart| chart.try_add_indicator(study))
     }
 }
 

@@ -18,6 +18,37 @@ pub struct StudyTable {
     pub columns: Vec<String>,
     /// Cells in each row, in column order.
     pub rows: Vec<Vec<StudyCell>>,
+    /// Optional background colour per cell, aligned with `rows`; empty or `None` uses the theme.
+    pub cell_bg: Vec<Vec<Option<egui::Color32>>>,
+    /// Optional text colour per cell, aligned with `rows`; empty or `None` uses the theme.
+    pub cell_text: Vec<Vec<Option<egui::Color32>>>,
+    /// The pane corner or edge the table sits in.
+    pub position: StudyTablePosition,
+}
+
+/// Where a study table sits in its pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StudyTablePosition {
+    /// The upper left corner.
+    TopLeft,
+    /// The top edge, centred.
+    TopCenter,
+    /// The upper right corner.
+    TopRight,
+    /// The left edge, centred.
+    MiddleLeft,
+    /// The centre of the pane.
+    MiddleCenter,
+    /// The right edge, centred.
+    MiddleRight,
+    /// The lower left corner.
+    BottomLeft,
+    /// The bottom edge, centred.
+    BottomCenter,
+    /// The lower right corner.
+    #[default]
+    BottomRight,
 }
 
 #[cfg(feature = "widget")]
@@ -88,7 +119,25 @@ pub(crate) fn paint(
         width.max(title_width).min(available.width()),
         height.min(available.height()).min(rect.height() * 0.5),
     );
-    let bounds = Rect::from_min_size(available.max - size, size);
+    let (align_x, align_y) = match table.position {
+        StudyTablePosition::TopLeft => (0.0, 0.0),
+        StudyTablePosition::TopCenter => (0.5, 0.0),
+        StudyTablePosition::TopRight => (1.0, 0.0),
+        StudyTablePosition::MiddleLeft => (0.0, 0.5),
+        StudyTablePosition::MiddleCenter => (0.5, 0.5),
+        StudyTablePosition::MiddleRight => (1.0, 0.5),
+        StudyTablePosition::BottomLeft => (0.0, 1.0),
+        StudyTablePosition::BottomCenter => (0.5, 1.0),
+        StudyTablePosition::BottomRight => (1.0, 1.0),
+    };
+    let bounds = Rect::from_min_size(
+        available.min
+            + vec2(
+                (available.width() - size.x) * align_x,
+                (available.height() - size.y) * align_y,
+            ),
+        size,
+    );
     let painter = painter.with_clip_rect(bounds.intersect(ui.clip_rect()));
     painter.rect_filled(bounds, 3.0, theme.ui.panel_bg_floating);
     painter.rect_stroke(
@@ -136,9 +185,20 @@ pub(crate) fn paint(
             .enumerate()
             {
                 let mut x = content.left();
-                for (cell, width) in row.iter().zip(&widths) {
+                // The heading row is synthesised above `rows`, so data colours shift by one.
+                let data_row = row_index.checked_sub(1);
+                for (column, (cell, width)) in row.iter().zip(&widths).enumerate() {
                     let cell_rect = Rect::from_min_size(pos2(x, y), vec2(*width, 22.0));
-                    let color = match cell {
+                    let own = |colors: &Vec<Vec<Option<egui::Color32>>>| {
+                        data_row
+                            .and_then(|row| colors.get(row))
+                            .and_then(|cells| cells.get(column))
+                            .copied()
+                            .flatten()
+                    };
+                    let bg = own(&table.cell_bg);
+                    let ink = own(&table.cell_text);
+                    let mut color = match cell {
                         _ if rating_table && row_index == 0 => {
                             painter.rect_filled(
                                 cell_rect,
@@ -211,6 +271,13 @@ pub(crate) fn paint(
                         }
                         _ => theme.ui.text,
                     };
+                    if let Some(bg) = bg {
+                        painter.rect_filled(cell_rect, 0.0, bg);
+                        color = theme.ui.text;
+                    }
+                    if let Some(ink) = ink {
+                        color = ink;
+                    }
                     painter.text(
                         pos2(x + 8.0, y + 11.0),
                         Align2::LEFT_CENTER,
@@ -245,6 +312,7 @@ mod tests {
                     row
                 })
                 .collect(),
+            ..StudyTable::default()
         };
         for (_, theme) in crate::theme::presets() {
             for width in [240.0, 800.0] {

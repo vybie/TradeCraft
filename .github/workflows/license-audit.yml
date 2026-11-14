@@ -1,0 +1,49 @@
+name: Dependency license review
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Review community graph and notices
+        run: python scripts/license-audit.py --target x86_64-pc-windows-msvc --output target/license-audit/community
+      - name: Review personal graph and notices
+        run: python scripts/license-audit.py --target x86_64-pc-windows-msvc --personal --output target/license-audit/personal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-license-inventories
+          path: target/license-audit/
+          if-no-files-found: error
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Review graph and notices
+        run: python3 scripts/license-audit.py --target '${{ matrix.target }}' --output target/license-audit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-license-inventory-${{ matrix.target }}
+          path: target/license-audit/
+          if-no-files-found: error

@@ -52,6 +52,8 @@ fn is_default_light(theme: &Theme) -> bool {
 /// next one. Edit the inputs of an added study with
 /// [`IndicatorSettingsDialog`](super::IndicatorSettingsDialog).
 pub struct IndicatorDialog {
+    /// Whether the host supplies a manager for custom scripts.
+    pub manage_scripts: bool,
     /// Is dialog open
     pub is_open: bool,
     /// Search field and query
@@ -168,6 +170,7 @@ impl IndicatorDialog {
             focus_search: false,
             focus_first_row: false,
             active_tab: IndicatorTab::Indicators,
+            manage_scripts: false,
             sel_category: IndicatorCategory::BuiltIns,
             favorites: HashSet::new(),
             indicators: IndicatorInfo::from_factory(&factory),
@@ -623,7 +626,7 @@ impl IndicatorDialog {
 
     /// Favourites remain available when empty; other categories need registered studies.
     fn offers(&self, category: IndicatorCategory) -> bool {
-        category == IndicatorCategory::Favorites
+        category == IndicatorCategory::Favorites || (category == IndicatorCategory::MyScripts && self.manage_scripts)
             || self
                 .indicators
                 .iter()
@@ -703,6 +706,10 @@ impl IndicatorDialog {
         config: &IndicatorDialogConfig,
         theme: &Theme,
     ) -> IndicatorDialogAction {
+        if self.sel_category == IndicatorCategory::MyScripts && self.manage_scripts {
+            if crate::ui_kit::buttons::Button::new("+ New script").secondary().small().show(ui).clicked() { self.close(); return IndicatorDialogAction::ManageScripts; }
+            ui.add_space(theme.spacing.lg);
+        }
         let mut filtered: Vec<IndicatorInfo> = self
             .indicators
             .iter()
@@ -824,7 +831,40 @@ impl IndicatorDialog {
             is_favorite,
             response.hovered() || response.has_focus(),
         );
-        let text_right = Self::draw_item_badges(ui, theme, rect, indicator, config.muted_color);
+        let mut badge_rect = rect;
+        if self.manage_scripts && indicator.id.starts_with("tradecraft-pine-library:") {
+            let size = DESIGN_TOKENS.sizing.button_sm;
+            let delete_rect = Rect::from_center_size(Pos2::new(rect.right() - size / 2.0 - theme.spacing.sm, rect.center().y), Vec2::splat(size));
+            let delete = ui.interact(delete_rect, ui.make_persistent_id("delete_script"), Sense::click());
+            let label = format!("Delete {}", indicator.name);
+            delete.widget_info(|| WidgetInfo::labeled(Role::Button, delete.enabled(), &label));
+            let icon_size = Vec2::splat(DESIGN_TOKENS.sizing.icon_sm);
+            icons::TRASH.as_image_tinted(icon_size, if delete.hovered() { theme.ui.error } else { theme.ui.text_secondary })
+                .paint_at(ui, Rect::from_center_size(delete_rect.center(), icon_size));
+            draw_focus_ring(ui, &delete, 0.0);
+            if delete.on_hover_text(label).clicked() {
+                self.close();
+                return Some(IndicatorDialogAction::ManageScript(indicator.id.clone()));
+            }
+            let menu_rect = delete_rect.translate(Vec2::new(-size, 0.0));
+            let menu = ui.interact(menu_rect, ui.make_persistent_id("script_menu"), Sense::click());
+            let label = format!("Options for {}", indicator.name);
+            menu.widget_info(|| WidgetInfo::labeled(Role::Button, menu.enabled(), &label));
+            let icon_size = Vec2::splat(DESIGN_TOKENS.sizing.icon_sm);
+            icons::UI_MORE_HORIZONTAL.as_image_tinted(icon_size, theme.ui.text_secondary)
+                .paint_at(ui, Rect::from_center_size(menu_rect.center(), icon_size));
+            draw_focus_ring(ui, &menu, 0.0);
+            let mut edit = false;
+            egui::Popup::menu(&menu).show(|ui| {
+                if ui.button("Edit").clicked() { edit = true; }
+            });
+            if edit {
+                self.close();
+                return Some(IndicatorDialogAction::EditScript(indicator.id.clone()));
+            }
+            badge_rect.max.x = menu_rect.left();
+        }
+        let text_right = Self::draw_item_badges(ui, theme, badge_rect, indicator, config.muted_color);
         Self::draw_item_text(ui, rect, text_right, indicator, config.text_color);
         draw_focus_ring(ui, &response, theme.radius.md);
 

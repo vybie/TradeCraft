@@ -1,6 +1,15 @@
 use serde_json::json;
 use std::path::PathBuf;
 
+/// Per-user application data, shared by provider and terminal persistence.
+pub fn data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    Some(base.join("TradeCraft"))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -28,14 +37,13 @@ impl Settings {
         }
     }
     fn path() -> Result<PathBuf, &'static str> {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .ok_or("Local application data folder is unavailable")?;
+        let base = data_dir().ok_or("Local application data folder is unavailable")?;
         let filename = if cfg!(feature = "vibestrader-credential") {
             "settings.json"
         } else {
             "settings-community.json"
         };
-        Ok(PathBuf::from(base).join("TradeCraft").join(filename))
+        Ok(base.join(filename))
     }
     pub fn load() -> Self {
         Self::path()

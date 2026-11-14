@@ -99,6 +99,10 @@ pub struct StudyCandle {
     pub bar: crate::model::Bar,
     /// Output whose colour, stroke width and visibility apply to this candle.
     pub plot: usize,
+    /// Optional per-candle colour supplied by the study.
+    pub color: Option<egui::Color32>,
+    /// Draw OHLC ticks instead of a candle body.
+    pub bar_style: bool,
 }
 
 /// A price band between two source bars, stored once instead of as a value on every bar.

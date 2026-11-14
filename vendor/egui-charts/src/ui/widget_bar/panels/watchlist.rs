@@ -35,7 +35,7 @@ const MARK_SIZE: f32 = 18.0;
 pub use crate::model::{Watchlist, WatchlistFlag, WatchlistItem};
 
 /// A sortable watchlist column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum WatchlistColumn {
     /// Sort by symbol.
@@ -109,7 +109,7 @@ impl WatchlistColumn {
 }
 
 /// A section of the wide watchlist.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum WatchlistSection {
     /// The table of quotes.
     #[default]
@@ -175,6 +175,7 @@ pub struct WatchlistPanel {
     lists: Vec<Watchlist>,
     active: usize,
     quotes: HashMap<String, Quote>,
+    labels: HashMap<String, String>,
     /// Decimals of the price columns per symbol, where the host knows them.
     decimals: HashMap<String, u8>,
     /// Marks of the symbols, where the host supplies them.
@@ -186,6 +187,8 @@ pub struct WatchlistPanel {
     /// Shows the symbols flagged this way in any list instead of the active list.
     flag_filter: Option<WatchlistFlag>,
     selected: Option<String>,
+    /// Symbols needed by other views but not necessarily displayed in the active watchlist.
+    tracked_symbols: Vec<String>,
     service: Option<Arc<dyn Quotes>>,
     inbox: Arc<Inbox>,
     share: ShareControls,
@@ -203,6 +206,21 @@ impl Default for WatchlistPanel {
 }
 
 impl WatchlistPanel {
+    /// The display selection, independent of the lists and live quotes.
+    pub fn saved_view(&self) -> serde_json::Value {
+        serde_json::json!({"active": self.active, "columns": self.columns, "sort": self.sort, "section": self.section, "flag_filter": self.flag_filter})
+    }
+
+    /// Restore a previously saved display selection, retaining defaults for unknown values.
+    pub fn restore_view(&mut self, view: &serde_json::Value) {
+        if let Some(index) = view.get("active").and_then(|v| v.as_u64()).and_then(|v| usize::try_from(v).ok()) {
+            if index < self.lists.len() { self.active = index; }
+        }
+        if let Some(columns) = view.get("columns").and_then(|v| serde_json::from_value::<Vec<WatchlistColumn>>(v.clone()).ok()) { self.set_columns(columns); }
+        self.sort = view.get("sort").and_then(|v| serde_json::from_value(v.clone()).ok());
+        if let Some(section) = view.get("section").and_then(|v| serde_json::from_value(v.clone()).ok()) { self.section = section; }
+        self.flag_filter = view.get("flag_filter").and_then(|v| serde_json::from_value(v.clone()).ok());
+    }
     /// A panel showing the first of `lists`, or one empty list when there are none.
     pub fn new(mut lists: Vec<Watchlist>) -> Self {
         if lists.is_empty() {
@@ -212,6 +230,7 @@ impl WatchlistPanel {
             lists,
             active: 0,
             quotes: HashMap::new(),
+            labels: HashMap::new(),
             decimals: HashMap::new(),
             marks: HashMap::new(),
             columns: WatchlistColumn::DEFAULT.to_vec(),
@@ -219,6 +238,7 @@ impl WatchlistPanel {
             section: WatchlistSection::default(),
             flag_filter: None,
             selected: None,
+            tracked_symbols: Vec::new(),
             service: None,
             inbox: Arc::default(),
             share: ShareControls::default(),
@@ -302,6 +322,11 @@ impl WatchlistPanel {
         self.quotes.get(symbol)
     }
 
+    /// Sets a display label without changing the symbol used for quotes and selection.
+    pub fn set_label(&mut self, symbol: &str, label: impl Into<String>) {
+        self.labels.insert(symbol.to_owned(), label.into());
+    }
+
     /// Shows the prices of `symbol` with `decimals`, as `Instrument::price_decimals`. Without
     /// them, the decimals follow the size of the last price.
     pub fn set_price_decimals(&mut self, symbol: &str, decimals: u8) {
@@ -344,6 +369,7 @@ impl WatchlistPanel {
         self.inbox.set_waker(move || repaint.request_repaint());
         let mut symbols: Vec<String> = self.symbols().map(str::to_owned).collect();
         symbols.extend(self.selected.clone());
+        symbols.extend(self.tracked_symbols.iter().cloned());
         symbols.sort();
         symbols.dedup();
         let lagged = self.listener.as_ref().is_none_or(|l| !l.is_active());
@@ -369,6 +395,13 @@ impl WatchlistPanel {
     /// Marks `symbol` selected, such as the symbol the chart shows.
     pub fn set_selected(&mut self, symbol: &str) {
         self.selected = Some(symbol.to_owned());
+    }
+
+    /// Includes additional symbols in the same quote subscription without adding watchlist rows.
+    pub fn set_tracked_symbols(&mut self, symbols: impl IntoIterator<Item = String>) {
+        self.tracked_symbols = symbols.into_iter().filter(|s| !s.is_empty()).collect();
+        self.tracked_symbols.sort_unstable();
+        self.tracked_symbols.dedup();
     }
 
     /// Appends `symbol` to the active list as [`Watchlist::add_symbol`] does, such as the symbol
@@ -415,6 +448,7 @@ impl WatchlistPanel {
             share,
             active,
             quotes,
+            labels,
             decimals,
             marks,
             columns: compact_columns,
@@ -894,7 +928,9 @@ impl WatchlistPanel {
                         }
                         WatchlistItem::Symbol { symbol, flag } => {
                             let is_selected = selected.as_deref() == Some(symbol.as_str());
-                            let translated_label = symbol.as_str();
+                            let translated_label = labels
+                                .get(symbol.as_str())
+                                .map_or(symbol.as_str(), String::as_str);
                             response.widget_info(|| {
                                 egui::WidgetInfo::labeled(
                                     egui::Role::ListBoxOption,
@@ -925,7 +961,7 @@ impl WatchlistPanel {
                             paint_symbol_mark(
                                 &painter,
                                 mark,
-                                symbol,
+                                translated_label,
                                 marks.get(symbol.as_str()).cloned(),
                             );
                             ui.new_child(
@@ -935,7 +971,7 @@ impl WatchlistPanel {
                             )
                             .add(
                                 Label::new(
-                                    RichText::new(symbol.as_str())
+                                    RichText::new(translated_label)
                                         .font(font.clone())
                                         .color(theme.ui.text),
                                 )

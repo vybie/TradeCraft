@@ -152,6 +152,11 @@ pub trait Indicator: Send {
         None
     }
 
+    /// All tables the study renders, defaulting to its single table.
+    fn tables(&self) -> Vec<&super::StudyTable> {
+        self.table().into_iter().collect()
+    }
+
     /// Whether this study stores presentation edits itself. Charts wrap other studies once.
     fn has_settings(&self) -> bool {
         false
@@ -273,6 +278,9 @@ pub trait Indicator: Send {
     fn plot_price_line(&self, _line: usize) -> bool {
         false
     }
+
+    /// Whether the latest-value line is solid rather than dotted.
+    fn plot_price_line_solid(&self, _line: usize) -> bool { false }
 
     /// Editable alternate colour and width states, separate from the output's main style.
     fn plot_variants(&self, _line: usize) -> Vec<super::PlotVariant> {
@@ -575,6 +583,14 @@ pub trait Indicator: Send {
     /// Return the short display name of this indicator (e.g. `"SMA"`, `"RSI"`, `"MACD"`).
     fn name(&self) -> &str;
 
+    /// Stable factory key used in saved templates. Hosts may embed reconstruction data.
+    fn persistence_name(&self) -> String {
+        self.name().to_owned()
+    }
+
+    /// Whether this exact study should appear at most once on a chart.
+    fn unique_per_chart(&self) -> bool { false }
+
     /// Return a human-readable description of what this indicator measures.
     ///
     /// Defaults to an empty string. Override to provide a tooltip-friendly
@@ -651,6 +667,12 @@ pub trait Indicator: Send {
         false
     }
 
+    /// Set the chart display timezone for studies that use it as a fallback.
+    fn set_chart_timezone(&mut self, timezone: &crate::scales::TimezoneMode) -> bool {
+        let _ = timezone;
+        false
+    }
+
     /// The typed events the chart holds for its symbol, those given to
     /// `Chart::set_time_scale_events`, in the order supplied. Returns `true` if calculation
     /// settings changed and the caller must recalculate from bar 0. The chart calls this on add
@@ -686,6 +708,12 @@ pub trait Indicator: Send {
     #[cfg(feature = "drawings")]
     fn drawings(&self) -> &[crate::drawings::Drawing] {
         &[]
+    }
+
+    /// Preserve styles supplied by individual study drawings.
+    #[cfg(feature = "drawings")]
+    fn keeps_drawing_style(&self) -> bool {
+        false
     }
 
     /// Market Profile settings of a study whose session profiles the chart builds with

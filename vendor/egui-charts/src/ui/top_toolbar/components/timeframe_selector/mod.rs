@@ -280,6 +280,20 @@ impl TimeframeSelector {
             })
     }
 
+    /// Custom entry is useful only if the active source can accept a non-preset interval.
+    fn supports_custom(&self) -> bool {
+        match self
+            .supported_timeframes
+            .as_ref()
+            .or(self.feed_timeframes.as_ref())
+        {
+            Some(available) => available
+                .iter()
+                .any(|tf| !PRESETS.contains(tf) && self.supports(*tf)),
+            None => true,
+        }
+    }
+
     /// Export the interval lists for the host's persisted user settings.
     pub fn preferences(&self) -> TimeframePreferences {
         let mut favorites: Vec<_> = self.favorites.iter().copied().collect();
@@ -459,12 +473,17 @@ impl TimeframeSelector {
             .max_height(max_height)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                let custom = ListItem::new().height(ROW_H).show(
-                    ui,
-                    LabelContent::new("Custom interval\u{2026}").with_icon(&embedded_icons::PLUS),
-                );
-                if custom.clicked() {
-                    self.show_custom_input = !self.show_custom_input;
+                if self.supports_custom() {
+                    let custom = ListItem::new().height(ROW_H).show(
+                        ui,
+                        LabelContent::new("Custom interval\u{2026}")
+                            .with_icon(&embedded_icons::PLUS),
+                    );
+                    if custom.clicked() {
+                        self.show_custom_input = !self.show_custom_input;
+                    }
+                } else {
+                    self.show_custom_input = false;
                 }
                 if self.show_custom_input
                     && let Some(tf) = self.custom_dialog.show(ui)
@@ -1224,6 +1243,28 @@ mod tests {
             assert_eq!(selector.supports(Model::Min1), min1);
             assert_eq!(selector.supports(Model::Day1), day1);
         }
+    }
+
+    #[test]
+    fn custom_entry_tracks_active_feed_and_symbol_capabilities() {
+        use crate::data::FeedCapabilities;
+        let mut selector = TimeframeSelector::default();
+        assert!(selector.supports_custom());
+        let custom: Model = "7min".parse().unwrap();
+        selector.set_feed_capabilities(&FeedCapabilities::new().with_timeframes([
+            Model::Min1,
+            Model::Min5,
+            Model::Min15,
+            Model::Day1,
+        ]));
+        assert!(!selector.supports_custom());
+        selector
+            .set_feed_capabilities(&FeedCapabilities::new().with_timeframes([Model::Min1, custom]));
+        assert!(selector.supports_custom());
+        selector.set_supported_timeframes(Some(vec![Model::Min1]));
+        assert!(!selector.supports_custom());
+        selector.set_supported_timeframes(None);
+        assert!(selector.supports_custom());
     }
 
     #[test]

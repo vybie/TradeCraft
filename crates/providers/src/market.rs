@@ -300,6 +300,8 @@ fn tradier_interval(interval: Interval) -> &'static str {
         Interval::FiveMinutes => "5min",
         Interval::FifteenMinutes => "15min",
         Interval::OneDay => "daily",
+        Interval::OneWeek => "weekly",
+        Interval::OneMonth => "monthly",
     }
 }
 
@@ -309,7 +311,11 @@ pub async fn tradier_history(
     extended_hours: bool,
     interval: Interval,
 ) -> Result<Vec<Bar>, String> {
-    let days = if interval == Interval::OneDay { 730 } else { 7 };
+    let days = match interval {
+        Interval::OneDay => 730,
+        Interval::OneWeek | Interval::OneMonth => 365 * 30,
+        _ => 7,
+    };
     tradier_history_range(
         symbol,
         token,
@@ -319,6 +325,194 @@ pub async fn tradier_history(
         None,
     )
     .await
+}
+
+/// Read bounded historical ticks. Availability varies by symbol and session; the end is exclusive.
+pub async fn tradier_ticks_range(
+    symbol: &str,
+    token: &str,
+    since: chrono::DateTime<Utc>,
+    until: chrono::DateTime<Utc>,
+    extended_hours: bool,
+) -> Result<Vec<Trade>, String> {
+    if since >= until || until - since > Duration::minutes(10) {
+        return Err("Invalid tick history range".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Unable to initialize market data client".to_owned())?;
+    let mut ticks = Vec::new();
+    let mut cursor =
+        chrono::DateTime::<Utc>::from_timestamp(since.timestamp().div_euclid(60) * 60, 0)
+            .ok_or("Invalid tick history range")?;
+    while cursor < until {
+        let next = cursor + Duration::minutes(1);
+        let start = cursor
+            .with_timezone(&chrono_tz::America::New_York)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        let end = next
+            .with_timezone(&chrono_tz::America::New_York)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        let response = client
+            .get("https://api.tradier.com/v1/markets/timesales")
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .query(&[
+                ("symbol", symbol),
+                ("interval", "tick"),
+                ("start", &start),
+                ("end", &end),
+                ("session_filter", if extended_hours { "all" } else { "open" }),
+            ])
+            .send()
+            .await
+            .map_err(|_| "Tradier tick history unavailable".to_owned())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Tradier tick history unavailable (HTTP {})",
+                response.status()
+            ));
+        }
+        let data = read_json(response).await?;
+        if data.get("series").is_none() {
+            return Err("Tradier did not return tick history".into());
+        }
+        let rows: Vec<&Value> = match &data["series"]["data"] {
+            Value::Array(rows) => rows.iter().collect(),
+            Value::Object(_) => vec![&data["series"]["data"]],
+            Value::Null => Vec::new(),
+            _ => return Err("Invalid Tradier tick history".into()),
+        };
+        if ticks.len().saturating_add(rows.len()) > 100_000 {
+            return Err("Tradier tick history exceeds the safe limit".into());
+        }
+        for row in rows {
+            if let Some(tick) = parse_history_tick(row)
+                && tick.timestamp_ms >= since.timestamp_millis()
+                && tick.timestamp_ms < until.timestamp_millis()
+                && tick.timestamp_ms >= cursor.timestamp_millis()
+                && tick.timestamp_ms < next.timestamp_millis()
+            {
+                ticks.push(tick);
+            }
+        }
+        cursor = next;
+    }
+    ticks.sort_by_key(|tick| tick.timestamp_ms);
+    Ok(ticks)
+}
+
+/// Select a recent tick-history window, using observed minute bars for extended sessions.
+pub async fn tradier_tick_window(
+    symbol: &str,
+    token: &str,
+    before: chrono::DateTime<Utc>,
+    extended_hours: bool,
+) -> Result<Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)>, String> {
+    if before < Utc::now() - Duration::days(5) {
+        return Ok(None);
+    }
+    if extended_hours {
+        let oldest = Utc::now() - Duration::days(5);
+        let bars = tradier_history_range(
+            symbol, token, true, Interval::OneMinute, oldest, Some(before),
+        )
+        .await?;
+        return Ok(extended_tick_window(&bars, before, oldest));
+    }
+    let client = crate::reference::client()?;
+    let eastern = before.with_timezone(&chrono_tz::America::New_York);
+    let mut cache = HashMap::new();
+    for offset in 0..=7 {
+        let Some(date) = eastern
+            .date_naive()
+            .checked_sub_signed(Duration::days(offset))
+        else {
+            break;
+        };
+        let key = (date.year(), date.month());
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+            entry.insert(crate::reference::tradier_calendar(&client, token, key.0, key.1).await?);
+        }
+        let Some(calendar) = cache.get(&key) else {
+            continue;
+        };
+        let entries = match &calendar["calendar"]["days"]["day"] {
+            Value::Array(days) => days.iter().collect::<Vec<_>>(),
+            Value::Object(_) => vec![&calendar["calendar"]["days"]["day"]],
+            _ => Vec::new(),
+        };
+        let date_text = date.format("%Y-%m-%d").to_string();
+        let Some(day) = entries
+            .into_iter()
+            .find(|d| d["date"].as_str() == Some(&date_text))
+        else {
+            continue;
+        };
+        let Some(start) = day["open"]["start"]
+            .as_str()
+            .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
+        else {
+            continue;
+        };
+        let Some(end) = day["open"]["end"]
+            .as_str()
+            .and_then(|s| NaiveTime::parse_from_str(s, "%H:%M").ok())
+        else {
+            continue;
+        };
+        let Some(open) = chrono_tz::America::New_York
+            .from_local_datetime(&date.and_time(start))
+            .single()
+            .map(|t| t.to_utc())
+        else {
+            continue;
+        };
+        let Some(close) = chrono_tz::America::New_York
+            .from_local_datetime(&date.and_time(end))
+            .single()
+            .map(|t| t.to_utc())
+        else {
+            continue;
+        };
+        let end = before.min(close);
+        if end <= open {
+            continue;
+        }
+        let start = open.max(end - Duration::minutes(5));
+        return Ok(Some((start, end)));
+    }
+    Ok(None)
+}
+
+fn extended_tick_window(
+    bars: &[Bar],
+    before: chrono::DateTime<Utc>,
+    oldest: chrono::DateTime<Utc>,
+) -> Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
+    let last = bars.iter().filter(|bar| bar.time < before).max_by_key(|bar| bar.time)?;
+    let end = before.min(last.time + Duration::minutes(1));
+    Some(((end - Duration::minutes(5)).max(oldest), end))
+}
+
+fn parse_history_tick(value: &Value) -> Option<Trade> {
+    let timestamp_ms = value["timestamp"].as_i64()?;
+    let price = number(&value["price"])?;
+    let size = number(&value["volume"])?;
+    if price <= 0.0
+        || size < 0.0
+        || chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms).is_none()
+    {
+        return None;
+    }
+    Some(Trade {
+        timestamp_ms,
+        price,
+        size,
+    })
 }
 
 /// Fetches historical bars from a specific UTC instant; request times are expressed in New York time.
@@ -337,18 +531,22 @@ pub async fn tradier_history_range(
     let local = since.with_timezone(&chrono_tz::America::New_York);
     let start = local.format("%Y-%m-%d %H:%M").to_string();
     let daily_start = local.format("%Y-%m-%d").to_string();
+    let calendar = matches!(
+        interval,
+        Interval::OneDay | Interval::OneWeek | Interval::OneMonth
+    );
     let mut request = client
-        .get(if interval == Interval::OneDay {
+        .get(if calendar {
             "https://api.tradier.com/v1/markets/history"
         } else {
             "https://api.tradier.com/v1/markets/timesales"
         })
         .bearer_auth(token)
         .header("Accept", "application/json");
-    request = if interval == Interval::OneDay {
+    request = if calendar {
         request.query(&[
             ("symbol", symbol),
-            ("interval", "daily"),
+            ("interval", tradier_interval(interval)),
             ("start", &daily_start),
         ])
     } else {
@@ -364,7 +562,7 @@ pub async fn tradier_history_range(
     };
     if let Some(until) = until {
         let local = until.with_timezone(&chrono_tz::America::New_York);
-        let end = if interval == Interval::OneDay {
+        let end = if calendar {
             local.format("%Y-%m-%d").to_string()
         } else {
             local.format("%Y-%m-%d %H:%M").to_string()
@@ -383,16 +581,12 @@ pub async fn tradier_history_range(
     }
     let json = read_json(response).await?;
     if json
-        .get(if interval == Interval::OneDay {
-            "history"
-        } else {
-            "series"
-        })
+        .get(if calendar { "history" } else { "series" })
         .is_none()
     {
         return Err("Tradier did not return chart history".into());
     }
-    let data = if interval == Interval::OneDay {
+    let data = if calendar {
         &json["history"]["day"]
     } else {
         &json["series"]["data"]
@@ -406,7 +600,7 @@ pub async fn tradier_history_range(
     let mut bars: Vec<Bar> = rows
         .into_iter()
         .filter_map(|row| {
-            if interval == Interval::OneDay {
+            if calendar {
                 parse_daily_bar(row)
             } else {
                 parse_bar(row)
@@ -627,6 +821,80 @@ pub(crate) fn parse_trade(value: &Value) -> Option<Trade> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tradier_historical_tick_uses_millisecond_timestamp_price_and_size() {
+        let row = json!({"time":"2026-11-12T20:55:00","timestamp":1794516900006i64,"price":354.925,"volume":40});
+        let tick = parse_history_tick(&row).unwrap();
+        assert_eq!(
+            (tick.timestamp_ms, tick.price, tick.size),
+            (1794516900006, 354.925, 40.0)
+        );
+        assert!(parse_history_tick(&json!({"price":1,"volume":1})).is_none());
+        assert!(
+            parse_history_tick(&json!({"timestamp":1794516900006i64,"price":-1,"volume":1}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn extended_tick_window_uses_latest_observed_minute_without_session_assumptions() {
+        let before = Utc.with_ymd_and_hms(2026, 11, 12, 8, 4, 0).unwrap();
+        let oldest = before - Duration::days(5);
+        let midnight = Utc.with_ymd_and_hms(2026, 11, 12, 8, 0, 0).unwrap();
+        let bars = vec![Bar::new(midnight, 1.0, 1.0, 1.0, 1.0, 1.0)];
+        assert_eq!(
+            extended_tick_window(&bars, before, oldest),
+            Some((midnight - Duration::minutes(4), midnight + Duration::minutes(1)))
+        );
+        assert_eq!(extended_tick_window(&[], before, oldest), None);
+    }
+    #[cfg(feature = "vibestrader-credential")]
+    #[test]
+    #[ignore = "requires saved Tradier credential and market-data network access"]
+    fn tradier_tick_window_and_history_live() {
+        let token = crate::credentials::vibestrader_token().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (start, end) = tradier_tick_window("AAPL", &token, Utc::now(), false)
+                .await
+                .unwrap()
+                .expect("recent session");
+            let ticks = tradier_ticks_range("AAPL", &token, start, end, false)
+                .await
+                .unwrap();
+            assert!(!ticks.is_empty());
+            assert!(
+                ticks
+                    .windows(2)
+                    .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms)
+            );
+            assert!(
+                ticks
+                    .iter()
+                    .all(|t| t.timestamp_ms >= start.timestamp_millis()
+                        && t.timestamp_ms < end.timestamp_millis())
+            );
+        });
+    }
+    #[cfg(feature = "vibestrader-credential")]
+    #[test]
+    #[ignore = "requires saved Tradier credential and market-data network access"]
+    fn tradier_weekly_and_monthly_history_live() {
+        let token = crate::credentials::vibestrader_token().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for interval in [Interval::OneWeek, Interval::OneMonth] {
+            let bars = rt
+                .block_on(tradier_history("AAPL", &token, true, interval))
+                .unwrap();
+            assert!(!bars.is_empty(), "missing {interval:?} history");
+        }
+    }
     #[tokio::test]
     #[ignore = "requires network access"]
     async fn tradier_websocket_tls_connects_without_an_account_subscription() {

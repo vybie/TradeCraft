@@ -95,6 +95,7 @@ pub struct Terminal {
     toasts: Toasts,
     top_toolbar: TopToolbar,
     force_session_control: bool,
+    time_controls_in_tabs: bool,
     menus: ChartMenus,
     /// Controls the host hid with [`Terminal::hide`].
     hidden: HashSet<Control>,
@@ -173,6 +174,7 @@ impl Terminal {
             top_toolbar: TopToolbar::new()
                 .with_config(TopToolbarConfig::default().with_height(38.0)),
             force_session_control: false,
+            time_controls_in_tabs: false,
             menus: ChartMenus::default(),
             hidden: HashSet::new(),
             settings: None,
@@ -241,6 +243,7 @@ impl Terminal {
         let mut flushed = true;
         if self.settings.is_some() {
             let current = self.user_settings();
+            flushed &= self.workspace_saved_snapshot_ready();
             if let Some(settings) = &mut self.settings {
                 flushed &= settings.flush(&current);
             }
@@ -248,6 +251,8 @@ impl Terminal {
         for chart in &mut self.charts {
             flushed &= chart.flush_stored_drawings();
         }
+        flushed &= self.flush_parked_drawings();
+        flushed &= !self.top_toolbar.layout_menu.storage_pending();
         flushed
     }
 
@@ -369,6 +374,11 @@ impl Terminal {
     /// Enables session switching when the host feed omits session metadata.
     pub fn set_force_session_control(&mut self, enabled: bool) {
         self.force_session_control = enabled;
+    }
+
+    /// Moves the clock and session controls into the chart tab strip, hiding the bottom bar.
+    pub fn set_time_controls_in_tabs(&mut self, enabled: bool) {
+        self.time_controls_in_tabs = enabled;
     }
 
     /// Passes `action` along the groups until one performs it, and returns what is left.

@@ -110,7 +110,44 @@ pub async fn search(
         .send()
         .await
         .map_err(|_| "Symbol search unavailable".to_owned())?;
-    Ok(parse_symbols(provider, &json(response).await?))
+    let mut matches = parse_symbols(provider, &json(response).await?);
+    if provider == Provider::Tradier && needs_ticker_lookup(query, &matches) {
+        let lookup = client
+            .get("https://api.tradier.com/v1/markets/lookup")
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .query(&[("q", query)])
+            .send()
+            .await;
+        if let Ok(response) = lookup
+            && let Ok(data) = json(response).await
+        {
+            merge_symbols(&mut matches, parse_symbols(provider, &data));
+        }
+    }
+    Ok(matches)
+}
+
+fn needs_ticker_lookup(query: &str, matches: &[SymbolMatch]) -> bool {
+    !query.is_empty()
+        && query.len() <= 16
+        && query
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '^'))
+        && !matches
+            .iter()
+            .any(|item| item.symbol.eq_ignore_ascii_case(query))
+}
+
+fn merge_symbols(matches: &mut Vec<SymbolMatch>, lookup: Vec<SymbolMatch>) {
+    for item in lookup {
+        if !matches.iter().any(|existing| {
+            existing.symbol.eq_ignore_ascii_case(&item.symbol)
+                && existing.exchange.eq_ignore_ascii_case(&item.exchange)
+        }) {
+            matches.push(item);
+        }
+    }
 }
 
 fn parse_tradier_quotes(data: &Value) -> Vec<MarketQuote> {
@@ -273,6 +310,50 @@ mod tests {
             "Apple Inc"
         );
         assert_eq!(parse_symbols(Provider::Yahoo, &yahoo)[0].symbol, "AAPL");
+    }
+
+    #[test]
+    fn ticker_lookup_fills_missing_match_without_duplicates() {
+        let mut found = parse_symbols(
+            Provider::Tradier,
+            &json!({"securities":{"security":[
+                {"symbol":"DOX","description":"Amdocs Ltd","exchange":"Q","type":"stock"}
+            ]}}),
+        );
+        assert!(needs_ticker_lookup("amd", &found));
+        let lookup = parse_symbols(
+            Provider::Tradier,
+            &json!({"securities":{"security":[
+                {"symbol":"AMD","description":"Advanced Micro Devices Inc","exchange":"Q","type":"stock"},
+                {"symbol":"DOX","description":"Amdocs Ltd","exchange":"Q","type":"stock"}
+            ]}}),
+        );
+        merge_symbols(&mut found, lookup);
+        assert_eq!(found.iter().filter(|s| s.symbol == "AMD").count(), 1);
+        assert_eq!(found.iter().filter(|s| s.symbol == "DOX").count(), 1);
+        assert!(!needs_ticker_lookup("amd", &found));
+        assert!(!needs_ticker_lookup("Advanced Micro Devices", &found));
+    }
+
+    #[cfg(feature = "vibestrader-credential")]
+    #[test]
+    #[ignore = "requires the saved personal Tradier credential and network access"]
+    fn tradier_amd_search_case() {
+        let token = crate::credentials::vibestrader_token().expect("saved Tradier credential");
+        let client = client().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for query in ["amd", "AMD"] {
+            let found = rt
+                .block_on(search(&client, Provider::Tradier, &token, query))
+                .unwrap();
+            assert!(
+                found.iter().any(|item| item.symbol == "AMD"),
+                "missing AMD for {query}"
+            );
+        }
     }
 
     #[cfg(feature = "vibestrader-credential")]

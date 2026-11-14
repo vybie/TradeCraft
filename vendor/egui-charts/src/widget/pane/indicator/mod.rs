@@ -204,7 +204,7 @@ impl IndicatorPane {
         // Draw indicator legend at top-left. The non-interactive path cannot
         // host a clickable close affordance, so no remove "x" is drawn here.
         self.draw_legend(painter, chart_rect, indicator, text_color);
-        if let Some(table) = indicator.table() {
+        for table in indicator.tables() {
             crate::studies::table::paint(ui, chart_rect, table, response.id);
         }
     }
@@ -300,7 +300,7 @@ impl IndicatorPane {
         // Draw indicator legend at top-left. The non-interactive path cannot
         // host a clickable close affordance, so no remove "x" is drawn here.
         self.draw_legend(painter, chart_rect, indicator, text_color);
-        if let Some(table) = indicator.table() {
+        for table in indicator.tables() {
             crate::studies::table::paint(ui, chart_rect, table, response.id);
         }
     }
@@ -341,7 +341,7 @@ impl IndicatorPane {
             |_, _| {},
         )?;
         crate::widget::primitives::paint_backgrounds(ui.painter(), axis_foregrounds);
-        if let Some(table) = indicator.table() {
+        for table in indicator.tables() {
             crate::studies::table::paint(
                 ui,
                 interaction.chart_rect,

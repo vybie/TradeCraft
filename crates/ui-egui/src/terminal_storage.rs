@@ -1,6 +1,6 @@
 use egui_charts::{
     data::{FeedError, Reply},
-    services::{Storage, StoreKind},
+    services::{Revision, SaveOutcome, Storage, StoreKind, Versioned},
 };
 use std::{
     io::Read,
@@ -14,6 +14,7 @@ use std::{
 pub struct FileStorage {
     guard: Arc<Mutex<()>>,
     pending: Arc<AtomicUsize>,
+    failures: Arc<Mutex<std::collections::HashMap<(StoreKind, String, &'static str), String>>>,
 }
 struct Ticket(Arc<AtomicUsize>);
 impl Drop for Ticket {
@@ -22,6 +23,12 @@ impl Drop for Ticket {
     }
 }
 impl FileStorage {
+    pub(crate) fn is_idle(&self) -> bool {
+        self.pending.load(Ordering::Acquire) == 0
+    }
+    pub(crate) fn write_failures(&self) -> Vec<String> {
+        self.failures.lock().map(|failures| failures.values().cloned().collect()).unwrap_or_else(|_| vec!["Could not check storage errors".into()])
+    }
     fn begin(&self) -> Option<Ticket> {
         self.pending
             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
@@ -29,6 +36,15 @@ impl FileStorage {
             })
             .ok()?;
         Some(Ticket(self.pending.clone()))
+    }
+}
+fn note_write<T>(failures: &Mutex<std::collections::HashMap<(StoreKind, String, &'static str), String>>, kind: StoreKind, name: &str, operation: &'static str, result: &Result<T, FeedError>) {
+    if let Ok(mut failures) = failures.lock() {
+        let key = (kind, name.to_owned(), operation);
+        match result {
+            Ok(_) => { failures.remove(&key); }
+            Err(error) => { failures.insert(key, format!("Could not {operation} {kind:?} '{name}': {error}")); }
+        }
     }
 }
 fn folder(kind: StoreKind) -> Option<&'static str> {
@@ -47,11 +63,10 @@ fn folder(kind: StoreKind) -> Option<&'static str> {
     }
 }
 fn root(kind: StoreKind) -> Result<PathBuf, FeedError> {
-    let base = std::env::var_os("LOCALAPPDATA")
+    let base = tradecraft_providers::settings::data_dir()
         .ok_or_else(|| FeedError::Other("Local application data unavailable".into()))?;
     let name = folder(kind).ok_or(FeedError::NotSupported)?;
-    Ok(PathBuf::from(base)
-        .join("TradeCraft")
+    Ok(base
         .join("terminal")
         .join(name))
 }
@@ -100,10 +115,32 @@ fn read(path: &Path) -> Result<Option<String>, FeedError> {
         Err(e) => Err(error(e)),
     }
 }
-fn write_atomic(path: &Path, document: &str) -> Result<(), FeedError> {
+pub(crate) fn write_atomic(path: &Path, document: &str) -> Result<(), FeedError> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, document).map_err(error)?;
-    std::fs::rename(&tmp, path).map_err(error)
+    let mut file = std::fs::File::create(&tmp).map_err(error)?;
+    file.write_all(document.as_bytes()).map_err(error)?;
+    file.sync_all().map_err(error)?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(error)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() { std::fs::File::open(parent).and_then(|dir| dir.sync_all()).map_err(error)?; }
+    Ok(())
+}
+pub(crate) fn document_lock(path: &Path) -> Result<std::fs::File, FeedError> {
+    let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path.with_extension("lock")).map_err(error)?;
+    lock.lock().map_err(error)?;
+    Ok(lock)
+}
+fn version(document: String) -> Versioned {
+    Versioned { revision: Revision(document.clone()), document }
+}
+fn compare_and_write(path: &Path, document: String, expected: Option<Revision>) -> Result<SaveOutcome, FeedError> {
+    let _file_lock = document_lock(path)?;
+    let current = read(path)?.map(version);
+    if current.as_ref().map(|v| &v.revision) != expected.as_ref() { return Ok(SaveOutcome::Conflict(current)); }
+    write_atomic(path, &document)?;
+    Ok(SaveOutcome::Saved(Revision(document)))
 }
 impl Storage for FileStorage {
     fn list(&self, kind: StoreKind, reply: Reply<Vec<String>>) {
@@ -156,10 +193,13 @@ impl Storage for FileStorage {
     }
     fn save(&self, kind: StoreKind, name: &str, document: String, reply: Reply<()>) {
         let Some(ticket) = self.begin() else {
-            reply.send(Err(FeedError::Other("Too many storage requests".into())));
+            let result = Err(FeedError::Other("Too many storage requests".into()));
+            note_write(&self.failures, kind, name, "save", &result);
+            reply.send(result);
             return;
         };
         let guard = self.guard.clone();
+        let failures = self.failures.clone();
         let name = name.to_owned();
         std::thread::spawn(move || {
             let _ticket = ticket;
@@ -173,18 +213,23 @@ impl Storage for FileStorage {
                 let path = path(kind, &name)?;
                 let dir = root(kind)?;
                 std::fs::create_dir_all(&dir).map_err(error)?;
+                let _file_lock = document_lock(&path)?;
                 write_atomic(&path, &document)?;
                 Ok(())
             })();
+            note_write(&failures, kind, &name, "save", &result);
             reply.send(result);
         });
     }
     fn delete(&self, kind: StoreKind, name: &str, reply: Reply<()>) {
         let Some(ticket) = self.begin() else {
-            reply.send(Err(FeedError::Other("Too many storage requests".into())));
+            let result = Err(FeedError::Other("Too many storage requests".into()));
+            note_write(&self.failures, kind, name, "delete", &result);
+            reply.send(result);
             return;
         };
         let guard = self.guard.clone();
+        let failures = self.failures.clone();
         let name = name.to_owned();
         std::thread::spawn(move || {
             let _ticket = ticket;
@@ -192,12 +237,50 @@ impl Storage for FileStorage {
                 let _lock = guard
                     .lock()
                     .map_err(|_| FeedError::Other("Storage unavailable".into()))?;
-                match std::fs::remove_file(path(kind, &name)?) {
+                let path = path(kind, &name)?;
+                std::fs::create_dir_all(root(kind)?).map_err(error)?;
+                let _file_lock = document_lock(&path)?;
+                match std::fs::remove_file(path) {
                     Ok(()) => Ok(()),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     Err(e) => Err(error(e)),
                 }
             })();
+            note_write(&failures, kind, &name, "delete", &result);
+            reply.send(result);
+        });
+    }
+    fn load_versioned(&self, kind: StoreKind, name: &str, reply: Reply<Option<Versioned>>) {
+        let Some(ticket) = self.begin() else { reply.send(Err(FeedError::Other("Too many storage requests".into()))); return; };
+        let guard = self.guard.clone();
+        let name = name.to_owned();
+        std::thread::spawn(move || {
+            let _ticket = ticket;
+            let result = (|| {
+                let _guard = guard.lock().map_err(|_| FeedError::Other("Storage unavailable".into()))?;
+                let path = path(kind, &name)?;
+                std::fs::create_dir_all(root(kind)?).map_err(error)?;
+                let _file_lock = document_lock(&path)?;
+                Ok(read(&path)?.map(version))
+            })();
+            reply.send(result);
+        });
+    }
+    fn save_versioned(&self, kind: StoreKind, name: &str, document: String, expected: Option<Revision>, reply: Reply<SaveOutcome>) {
+        let Some(ticket) = self.begin() else { let result = Err(FeedError::Other("Too many storage requests".into())); note_write(&self.failures, kind, name, "save", &result); reply.send(result); return; };
+        let guard = self.guard.clone();
+        let failures = self.failures.clone();
+        let name = name.to_owned();
+        std::thread::spawn(move || {
+            let _ticket = ticket;
+            let result = (|| {
+                if document.len() > 2_000_000 { return Err(FeedError::Other("Storage document too large".into())); }
+                let _guard = guard.lock().map_err(|_| FeedError::Other("Storage unavailable".into()))?;
+                let path = path(kind, &name)?;
+                std::fs::create_dir_all(root(kind)?).map_err(error)?;
+                compare_and_write(&path, document, expected)
+            })();
+            note_write(&failures, kind, &name, "save", &result);
             reply.send(result);
         });
     }
@@ -205,6 +288,16 @@ impl Storage for FileStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn write_failure_is_kept_until_that_write_succeeds() {
+        let storage = FileStorage::default();
+        note_write(&storage.failures, StoreKind::StudyTemplates, "Mine", "save", &Err::<(), _>(FeedError::Other("disk full".into())));
+        assert_eq!(storage.write_failures().len(), 1);
+        note_write(&storage.failures, StoreKind::StudyTemplates, "Other", "save", &Ok::<_, FeedError>(()));
+        assert_eq!(storage.write_failures().len(), 1);
+        note_write(&storage.failures, StoreKind::StudyTemplates, "Mine", "save", &Ok::<_, FeedError>(()));
+        assert!(storage.write_failures().is_empty());
+    }
     #[test]
     fn names_are_path_safe_and_reversible() {
         for value in ["AAPL", "../x", "a/b", "💵", ""] {
@@ -224,5 +317,16 @@ mod tests {
         write_atomic(&path, "second").expect("replace");
         assert_eq!(read(&path).expect("read").as_deref(), Some("second"));
         std::fs::remove_file(path).expect("cleanup");
+    }
+    #[test]
+    fn competing_writes_do_not_replace_a_newer_document() {
+        let path = std::env::temp_dir().join(format!("tradecraft-conflict-{}-{}.json", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()));
+        let first = match compare_and_write(&path, "first".into(), None).unwrap() { SaveOutcome::Saved(revision) => revision, _ => panic!("expected save") };
+        let second = compare_and_write(&path, "second".into(), Some(first.clone())).unwrap();
+        assert!(matches!(second, SaveOutcome::Saved(_)));
+        assert!(matches!(compare_and_write(&path, "stale".into(), Some(first)).unwrap(), SaveOutcome::Conflict(_)));
+        assert_eq!(read(&path).unwrap().as_deref(), Some("second"));
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("lock"));
     }
 }

@@ -105,6 +105,8 @@ impl SettingsDialog {
         let settings = ChartSettingsState::default();
         let timezones: &[&str] = if cfg!(feature = "timezones") {
             &[
+                "Local",
+                "Exchange:UTC",
                 "UTC",
                 "America/New_York",
                 "America/Chicago",
@@ -118,7 +120,16 @@ impl SettingsDialog {
             ]
         } else {
             &[
-                "UTC", "-08:00", "-06:00", "-05:00", "+01:00", "+08:00", "+09:00", "+10:00",
+                "Local",
+                "Exchange:UTC",
+                "UTC",
+                "-08:00",
+                "-06:00",
+                "-05:00",
+                "+01:00",
+                "+08:00",
+                "+09:00",
+                "+10:00",
             ]
         };
         Self {
@@ -1158,7 +1169,15 @@ mod tests {
             .map(|session| session.timezone),
         );
         for zone in zones {
-            assert!(zone.parse::<crate::model::TimezoneId>().is_ok(), "{zone}");
+            assert!(
+                zone == "Local"
+                    || zone
+                        .strip_prefix("Exchange:")
+                        .unwrap_or(&zone)
+                        .parse::<crate::model::TimezoneId>()
+                        .is_ok(),
+                "{zone}"
+            );
         }
     }
 

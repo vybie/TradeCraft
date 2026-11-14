@@ -108,6 +108,8 @@ pub(super) struct State {
     profiles: Option<ProfileDirectory>,
     profile: Option<ProfileId>,
     wide_watchlist: bool,
+    pub(super) side_width: Option<f32>,
+    details_height: Option<f32>,
     /// Reuses the watchlist quote subscription and validation for the heatmap universes.
     heatmap_quotes: WatchlistPanel,
     /// Revision and last bar, since live changes to that bar do not change the revision.
@@ -145,6 +147,8 @@ impl Default for State {
             profiles: None,
             profile: None,
             wide_watchlist: false,
+            side_width: None,
+            details_height: None,
             heatmap_quotes: WatchlistPanel::new(vec![Watchlist::new("Heatmap")]),
             returns_input: None,
             import: None,
@@ -160,6 +164,20 @@ fn is_panel_widget(id: u64) -> bool {
 }
 
 impl SidePanel {
+    fn saved_name(self) -> &'static str {
+        match self {
+            Self::ObjectTree => "ObjectTree", Self::Alerts => "Alerts", Self::DataWindow => "DataWindow",
+            Self::Watchlist => "Watchlist", Self::TimeAndSales => "TimeAndSales", Self::Highlights => "Highlights",
+            Self::Screener => "Screener", Self::Hotlists => "Hotlists", Self::MarketHeatmap => "MarketHeatmap",
+            Self::Calendar => "Calendar", Self::News => "News", Self::Notifications => "Notifications",
+            Self::Chats => "Chats", Self::Products => "Products",
+        }
+    }
+    fn from_saved_name(name: &str) -> Option<Self> {
+        [Self::ObjectTree, Self::Alerts, Self::DataWindow, Self::Watchlist, Self::TimeAndSales,
+         Self::Highlights, Self::Screener, Self::Hotlists, Self::MarketHeatmap, Self::Calendar,
+         Self::News, Self::Notifications, Self::Chats, Self::Products].into_iter().find(|p| p.saved_name() == name)
+    }
     /// The panels with a built-in rail entry, in the order of the rail.
     const RAIL: [SidePanel; 12] = [
         SidePanel::Watchlist,
@@ -496,9 +514,10 @@ impl Terminal {
         }
         let market = &mut self.panels.market;
         let mut picked = None;
-        egui::Panel::right("egui_charts_terminal_detail_panel")
+        let mut details_height = self.panels.details_height;
+        let response = egui::Panel::right("egui_charts_terminal_detail_panel")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(self.panels.side_width.unwrap_or(300.0))
             .min_size(220.0)
             .max_size((ui.available_width() * 0.5).max(220.0))
             .show_separator_line(false)
@@ -511,12 +530,13 @@ impl Terminal {
             .show(ui, |ui| match which {
                 SidePanel::Watchlist => {
                     if ui.available_height() >= 400.0 {
-                        egui::Panel::bottom("egui_charts_terminal_symbol_details")
+                        let response = egui::Panel::bottom("egui_charts_terminal_symbol_details")
                             .resizable(true)
-                            .default_size(ui.available_height() / 2.0)
+                            .default_size(details_height.unwrap_or(ui.available_height() / 2.0))
                             .min_size(120.0)
                             .frame(egui::Frame::NONE)
                             .show(ui, |ui| market.details.show(ui));
+                        details_height = Some(response.response.rect.height());
                     }
                     match market.watchlist.show(ui) {
                         WatchlistAction::None => {}
@@ -558,6 +578,8 @@ impl Terminal {
                 },
                 SidePanel::ObjectTree | SidePanel::Alerts | SidePanel::DataWindow => {}
             });
+        self.panels.side_width = Some(response.response.rect.width());
+        self.panels.details_height = details_height;
         picked
     }
 
@@ -754,7 +776,11 @@ impl Terminal {
         match direction {
             Direction::Save => {
                 settings.watchlists = watchlist.lists().to_vec();
+                settings.watchlist_view = Some(watchlist.saved_view());
                 settings.market_heatmap = self.panels.market.heatmap.selection.clone();
+                settings.side_panel = Some(self.panel.map_or("closed", SidePanel::saved_name).to_owned());
+                settings.side_panel_width = self.panels.side_width;
+                settings.symbol_details_height = self.panels.details_height;
             }
             Direction::Load if !settings.watchlists.is_empty() => {
                 let selected = self.charts[self.active].symbol().to_owned();
@@ -763,8 +789,17 @@ impl Terminal {
                     watchlist.set_service(quotes.clone());
                 }
                 watchlist.set_selected(&selected);
+                if let Some(view) = &settings.watchlist_view { watchlist.restore_view(view); }
             }
             Direction::Load => {}
+        }
+        if direction == Direction::Load {
+            if let Some(name) = settings.side_panel.as_deref() {
+                if name == "closed" { self.panel = None; }
+                else if let Some(panel) = SidePanel::from_saved_name(name) { self.panel = Some(panel); }
+            }
+            self.panels.side_width = settings.side_panel_width.filter(|v| v.is_finite() && *v >= 220.0 && *v <= 10000.0);
+            self.panels.details_height = settings.symbol_details_height.filter(|v| v.is_finite() && *v >= 120.0 && *v <= 10000.0);
         }
     }
 

@@ -62,6 +62,15 @@ pub struct UserSettings {
     pub drawing_defaults: BTreeMap<String, serde_json::Value>,
     /// The watchlists, in order.
     pub watchlists: Vec<Watchlist>,
+    /// Watchlist selection and display options.
+    pub watchlist_view: Option<serde_json::Value>,
+    /// Selected sidebar, or "closed" when hidden.
+    pub side_panel: Option<String>,
+    /// Saved sidebar width and symbol-detail height in logical points.
+    pub side_panel_width: Option<f32>,
+    pub symbol_details_height: Option<f32>,
+    /// Open chart tabs and the selected tab, captured separately from named layouts.
+    pub open_workspace: Option<serde_json::Value>,
     /// The market heatmap's universe, size metric and colour metric.
     pub market_heatmap: MarketHeatmapSelection,
     /// The replay position to resume, with the interval its history was fetched at. A position

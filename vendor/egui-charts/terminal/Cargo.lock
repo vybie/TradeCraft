@@ -616,6 +616,7 @@ dependencies = [
  "egui",
  "egui-charts",
  "egui_extras",
+ "iana-time-zone",
  "rand",
  "serde_json",
 ]

@@ -1,6 +1,6 @@
 # TradeCraft 0.2.0 alpha
 
-TradeCraft 0.2.0 replaces the initial prototype window with the egui-charts terminal and expands the market-data integration. This is an early, read-only community preview.
+TradeCraft 0.2.0 replaces the initial charting window with the egui-charts terminal and expands the market-data integration. This is an early, read-only community preview.
 
 ## Charting workspace
 

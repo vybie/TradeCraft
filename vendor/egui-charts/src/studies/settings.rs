@@ -595,6 +595,10 @@ impl Indicator for ConfiguredStudy {
         self.study.table()
     }
 
+    fn tables(&self) -> Vec<&super::StudyTable> {
+        self.study.tables()
+    }
+
     fn has_settings(&self) -> bool {
         true
     }
@@ -613,6 +617,12 @@ impl Indicator for ConfiguredStudy {
     }
     fn name(&self) -> &str {
         self.study.name()
+    }
+    fn persistence_name(&self) -> String {
+        self.study.persistence_name()
+    }
+    fn unique_per_chart(&self) -> bool {
+        self.study.unique_per_chart()
     }
     fn desc(&self) -> &str {
         self.study.desc()
@@ -947,6 +957,9 @@ impl Indicator for ConfiguredStudy {
             false
         }
     }
+    fn set_chart_timezone(&mut self, timezone: &crate::scales::TimezoneMode) -> bool {
+        self.study.set_chart_timezone(timezone)
+    }
     fn set_time_scale_events(&mut self, events: &[crate::model::TimeScaleEvent]) -> bool {
         // A study calculated on another symbol has none of the chart's events.
         self.study
@@ -977,6 +990,10 @@ impl Indicator for ConfiguredStudy {
     #[cfg(feature = "drawings")]
     fn drawings(&self) -> &[crate::drawings::Drawing] {
         self.study.drawings()
+    }
+    #[cfg(feature = "drawings")]
+    fn keeps_drawing_style(&self) -> bool {
+        self.study.keeps_drawing_style()
     }
     fn candles(&self) -> &[super::StudyCandle] {
         self.study.candles()
@@ -1042,7 +1059,14 @@ impl Indicator for ConfiguredStudy {
         }
     }
     fn plot_price_line(&self, line: usize) -> bool {
-        self.settings.price_line_plots.contains(&line)
+        if line < self.settings.plots.len() {
+            self.settings.price_line_plots.contains(&line)
+        } else {
+            self.study.plot_price_line(line)
+        }
+    }
+    fn plot_price_line_solid(&self, line: usize) -> bool {
+        self.study.plot_price_line_solid(line)
     }
     fn plot_variants(&self, line: usize) -> Vec<PlotVariant> {
         self.settings

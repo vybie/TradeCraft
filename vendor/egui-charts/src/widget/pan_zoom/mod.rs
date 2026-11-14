@@ -255,8 +255,8 @@ impl Chart {
     /// Handle drag-to-pan, price-axis scaling, and time-axis drag-zoom.
     ///
     /// When the drag starts on the main chart area, horizontal movement pans the
-    /// time axis and, while auto-scale is off, vertical movement pans the price
-    /// axis. Starting on the price axis enables price scale dragging.
+    /// time axis and vertical movement pans the price axis, switching it to manual
+    /// scaling after a deliberate vertical drag. Starting on the price axis enables price scale dragging.
     /// Starting on the time axis enables drag-to-zoom the time scale. Also
     /// tracks velocity for kinetic scrolling continuation after release.
     pub(crate) fn handle_drag_pan(
@@ -416,13 +416,21 @@ impl Chart {
                     }
                 }
 
-                // Manual prices follow only the movement enabled for this input device.
+                // A vertical drag on the price pane takes control of its scale. Use the
+                // whole displacement on the first frame so the grabbed price does not jump.
                 if vertical
+                    && !self.state.data().is_empty()
                     && self.last_rendered_price_rect.height() > 0.0
-                    && self.state.price_scale().is_manual()
+                    && self.last_rendered_price_rect.contains(origin)
+                    && (self.state.price_scale().is_manual()
+                        || (curr_pos.y - origin.y).abs() >= 4.0)
                 {
                     let map = self.last_price_map;
-                    let dy = response.drag_delta().y;
+                    let dy = if self.state.price_scale().is_manual() {
+                        response.drag_delta().y
+                    } else {
+                        curr_pos.y - origin.y
+                    };
                     let shift = map.y_to_scale(curr_pos.y - dy) - map.y_to_scale(curr_pos.y);
                     let range = self.state.price_scale().range();
                     self.state
@@ -1777,6 +1785,38 @@ mod tests {
                         && (range.max - (110.0 + shift)).abs() < 1e-4,
                     "inverted {invert_scale}, touch={touch}, mouse={mouse}, vertical={vertical}: {range:?}, expected a shift of {shift}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_drag_takes_control_of_an_auto_scaled_price_range() {
+        for (touch, enabled, inverted) in [
+            (false, true, false),
+            (true, true, false),
+            (false, true, true),
+            (false, false, false),
+            (true, false, false),
+        ] {
+            let mut chart = chart(&[95.0, 100.0], &[105.0, 110.0]);
+            chart.apply_series_settings(&SeriesSettings {
+                invert_scale: inverted,
+                ..SeriesSettings::default()
+            });
+            chart.chart_options.handle_scroll.pressed_mouse_move = enabled;
+            chart.chart_options.handle_scroll.vert_touch_drag = enabled;
+            chart.chart_options.kinetic_scroll.enabled = false;
+            let ctx = egui::Context::default();
+            frame(&ctx, &mut chart, 0.0, vec![]);
+            let before = chart.state.price_scale().range();
+            assert!(!chart.state.price_scale().is_manual());
+            drag_down(&mut chart, |rect| rect.center(), 10, touch);
+            let after = chart.state.price_scale().range();
+            assert_eq!(chart.state.price_scale().is_manual(), enabled);
+            if enabled {
+                assert!((after.min - before.min) * if inverted { -1.0 } else { 1.0 } > 0.0);
+            } else {
+                assert_eq!(after, before);
             }
         }
     }

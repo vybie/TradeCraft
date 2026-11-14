@@ -72,13 +72,27 @@ impl IndicatorInfo {
                     .desc()
                     .split_once(" - ")
                     .unwrap_or((id.as_str(), study.desc()));
+                let name = if factory.category(&id) == Some(IndicatorFactory::PERSONAL) { study.name() } else { name };
                 let mut info = IndicatorInfo::new(id.clone(), name, desc);
                 info.category = factory.category(&id).unwrap_or_default().to_string();
                 info.is_overlay = study.is_overlay();
                 Some(info)
             })
             .collect();
-        infos.sort_by_key(|info| info.name.to_lowercase());
+        infos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id)));
+        // Saved Pine entries can have the same title; distinguish them in their creation order.
+        let mut at = 0;
+        while at < infos.len() {
+            let mut end = at + 1;
+            while end < infos.len() && infos[end].name == infos[at].name { end += 1; }
+            let saved = (at..end).filter(|&i| infos[i].id.starts_with("tradecraft-pine-library:")).collect::<Vec<_>>();
+            if saved.len() > 1 {
+                for (index, &i) in saved.iter().enumerate() {
+                    infos[i].name = format!("{} ({} of {})", infos[i].name, index + 1, saved.len());
+                }
+            }
+            at = end;
+        }
         infos
     }
 }

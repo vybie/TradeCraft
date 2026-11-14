@@ -32,6 +32,11 @@ impl Chart {
         &mut self,
         indicator: Box<dyn Indicator>,
     ) -> Result<SeriesId, StudyError> {
+        if indicator.unique_per_chart()
+            && self.indicators().any(|(_, existing)| existing.persistence_name() == indicator.persistence_name())
+        {
+            return Err(StudyError::DuplicateStudy(indicator.name().to_owned()));
+        }
         if self.study_limit_reached() {
             return Err(StudyError::StudyLimitReached(RefusedStudy::new(indicator)));
         }
@@ -53,6 +58,7 @@ impl Chart {
             indicator.set_value_formatter(self.volume_formatter.clone());
         }
         indicator.set_instrument(self.instrument());
+        indicator.set_chart_timezone(&self.chart_options.time_scale.timezone);
         indicator.set_time_scale_events(held_events(
             &self.time_scale_events,
             self.frozen_source_events,
@@ -267,14 +273,16 @@ impl Chart {
     /// is due, zero if one is due now.
     pub(super) fn refresh_studies(&mut self, now: f64) -> Option<f64> {
         let instrument = self.instrument().cloned();
+        let timezone = self.chart_options.time_scale.timezone.clone();
         let clock = self.bar_clock();
         let bars = &self.state.data().bars;
         let events = held_events(&self.time_scale_events, self.frozen_source_events);
         for (at, study) in self.studies.indicators_mut().iter_mut().enumerate() {
             let instrument_changed = study.set_instrument(instrument.as_ref());
+            let timezone_changed = study.set_chart_timezone(&timezone);
             let clock_changed = study.set_bar_clock(&clock);
             let events_changed = study.set_time_scale_events(events);
-            if instrument_changed || clock_changed || events_changed {
+            if instrument_changed || timezone_changed || clock_changed || events_changed {
                 self.pending_from[at] = Some(0);
                 self.element_studies.dirty = true;
                 self.readout_revision = crate::model::next_revision();

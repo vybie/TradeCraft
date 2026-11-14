@@ -129,6 +129,7 @@ impl<const RISING: bool> Wedge<RISING> {
                 .into(),
                 columns: ["Wedge", "Anchors", "Confirmed"].map(String::from).to_vec(),
                 rows: Vec::new(),
+                ..StudyTable::default()
             },
             colors: if RISING {
                 [palette::GREEN, palette::GREEN, palette::RED]
