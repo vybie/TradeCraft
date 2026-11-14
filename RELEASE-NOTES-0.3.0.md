@@ -35,6 +35,6 @@ Alerts are saved between sessions and evaluated while TradeCraft is running.
 
 The Windows community and personal builds retain separate provider preferences. The personal build continues to include the VibesTrader credential shortcut.
 
-macOS support is underway, with native credential storage and packaging prepared for Apple Silicon and Intel.
+macOS builds are available for Apple Silicon and Intel, with native credential storage and packaged app bundles. They are unsigned and not notarized. The Mac builds use commit `2376167`, which adds test, documentation and CI changes to the 0.3.0 application source.
 
 TradeCraft remains alpha and read-only. For current feature limitations, provider details, release checks and the remaining macOS build and license work, see the [README](README.md), [architecture report](ARCHITECTURE.md), and [release checklist](RELEASE-CHECKLIST.md).
