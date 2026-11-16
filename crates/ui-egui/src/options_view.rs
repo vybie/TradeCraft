@@ -1,5 +1,7 @@
 use egui_charts::scales::{CurrencyFormatter, PriceFormatter};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tradecraft_providers::{
     options::Contract,
     reference::MarketQuote,
@@ -29,6 +31,12 @@ pub struct OptionsView {
     fetched: Option<chrono::DateTime<chrono::Local>>,
     columns: Vec<String>,
     columns_error: String,
+    live: Option<Arc<Mutex<crate::options_stream::State>>>,
+    live_revision: Option<u64>,
+    live_reconnects: u64,
+    stream_status: String,
+    request_settings: Option<Settings>,
+    retry_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -426,6 +434,12 @@ impl Default for OptionsView {
             fetched: None,
             columns: load_columns(),
             columns_error: String::new(),
+            live: None,
+            live_revision: None,
+            live_reconnects: 0,
+            stream_status: String::new(),
+            request_settings: None,
+            retry_at: None,
         }
     }
 }
@@ -577,6 +591,12 @@ impl OptionsView {
         self.fetched = None;
         self.error.clear();
         self.receiver = None;
+        self.live = None;
+        self.live_revision = None;
+        self.live_reconnects = 0;
+        self.stream_status.clear();
+        self.retry_at = None;
+        self.request_settings = Some(settings);
         if settings.provider != Provider::Tradier {
             self.loading = false;
             self.error = "Select Tradier in Market data settings to view options.".into();
@@ -590,9 +610,7 @@ impl OptionsView {
         let expiration = self.expiration.clone();
         self.loading = true;
         self.error.clear();
-        self.contracts.clear();
-        self.underlying = None;
-        self.fetched = None;
+        self.retry_at = None;
         let (tx, rx) = mpsc::channel();
         self.receiver = Some(rx);
         std::thread::spawn(move || {
@@ -643,7 +661,21 @@ impl OptionsView {
         });
     }
 
+    #[cfg(test)]
     pub fn show(&mut self, ctx: &egui::Context, settings: Settings) -> Option<String> {
+        self.show_with_feed(ctx, settings, None)
+    }
+
+    pub fn show_with_feed(&mut self, ctx: &egui::Context, settings: Settings, feed: Option<&crate::terminal_feed::Feed>) -> Option<String> {
+        if !self.open {
+            self.live = None;
+            self.receiver = None;
+            self.loading = false;
+            return None;
+        }
+        if self.request_settings.is_some_and(|previous| previous != settings) {
+            self.open_for(&self.symbol.clone(), settings);
+        }
         if let Some(rx) = &self.receiver {
             match rx.try_recv() {
                 Ok(message) => {
@@ -661,13 +693,21 @@ impl OptionsView {
                             }
                         }
                         ResultMessage::Chain(Ok((contracts, quote))) => {
+                            self.scroll_to_price = self.fetched.is_none();
+                            let old_symbols: std::collections::BTreeSet<_> = self.contracts.iter().map(|contract| &contract.symbol).collect();
+                            let new_symbols: std::collections::BTreeSet<_> = contracts.iter().map(|contract| &contract.symbol).collect();
+                            if old_symbols != new_symbols {
+                                self.live = None;
+                                self.live_reconnects = 0;
+                            }
                             self.contracts = contracts;
                             self.underlying = quote;
-                            self.scroll_to_price = true;
                             self.fetched = Some(chrono::Local::now());
+                            self.live_revision = None;
                         }
                         ResultMessage::Expirations(Err(e)) | ResultMessage::Chain(Err(e)) => {
-                            self.error = e
+                            self.error = e;
+                            self.retry_at = Some(Instant::now() + Duration::from_secs(30));
                         }
                     }
                 }
@@ -675,6 +715,7 @@ impl OptionsView {
                     self.receiver = None;
                     self.loading = false;
                     self.error = "Options request stopped unexpectedly.".into();
+                    self.retry_at = Some(Instant::now() + Duration::from_secs(30));
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -682,6 +723,39 @@ impl OptionsView {
         if !self.open {
             return None;
         }
+        if self.live.is_none() && !self.contracts.is_empty() && settings.provider == Provider::Tradier
+            && let Some(feed) = feed {
+            let mut symbols: Vec<_> = self.contracts.iter().map(|contract| contract.symbol.clone()).collect();
+            symbols.push(self.symbol.clone());
+            self.live = feed.options_stream(symbols, ctx.clone());
+        }
+        if let Some(live) = self.live.clone() && let Ok(state) = live.lock() {
+            self.stream_status = state.message.clone();
+            if self.live_revision != Some(state.revision) {
+                for contract in &mut self.contracts {
+                    if let Some(prices) = state.prices.get(&contract.symbol) { prices.apply(contract); }
+                }
+                if let Some(quote) = &mut self.underlying
+                    && let Some(trade) = state.prices.get(&self.symbol).and_then(|prices| prices.last_trade())
+                    && let Some(time) = chrono::DateTime::from_timestamp_millis(trade.timestamp_ms)
+                    && time >= quote.time {
+                    quote.last = trade.price;
+                    quote.time = time;
+                }
+                self.live_revision = Some(state.revision);
+            }
+            if state.connected && state.reconnects > self.live_reconnects && !self.loading {
+                let reconnect = self.live_reconnects > 0;
+                self.live_reconnects = state.reconnects;
+                if reconnect { self.request(settings, true); }
+            }
+        }
+        if !self.loading && settings.provider == Provider::Tradier
+            && self.retry_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.request(settings, !self.expiration.is_empty());
+        }
+        if self.loading { ctx.request_repaint_after(Duration::from_millis(100)); }
+        if let Some(deadline) = self.retry_at { ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now())); }
         let mut open = self.open;
         let mut picked = None;
         let screen = ctx.content_rect().size();
@@ -714,7 +788,16 @@ impl OptionsView {
                     egui::ComboBox::from_id_salt("options_expiration").width(190.0).selected_text(if self.expiration.is_empty() { "Unavailable".into() } else { self.expiration.clone() }).show_ui(ui, |ui| {
                         for date in &self.expirations { ui.selectable_value(&mut self.expiration, date.clone(), date); }
                     }).response.labelled_by(expiration_label.id);
-                    if previous != self.expiration { self.request(settings, true); }
+                    if previous != self.expiration {
+                        self.live = None;
+                        self.live_revision = None;
+                        self.live_reconnects = 0;
+                        self.stream_status.clear();
+                        self.contracts.clear();
+                        self.underlying = None;
+                        self.fetched = None;
+                        self.request(settings, true);
+                    }
                     if ui.add_enabled(!self.loading && settings.provider == Provider::Tradier, egui::Button::new("Refresh")).clicked() { self.request(settings, !self.expiration.is_empty()); }
                     let mut columns_changed = false;
                     ui.menu_button("Columns", |ui| {
@@ -736,10 +819,11 @@ impl OptionsView {
                 });
                 ui.add_space(8.0);
                 if !self.columns_error.is_empty() { ui.label(&self.columns_error); }
-                if self.loading { ui.label("Loading options…"); }
+                if self.loading { ui.label(if self.fetched.is_some() { "Refreshing options…" } else { "Loading options…" }); }
+                if !self.stream_status.is_empty() { ui.small(&self.stream_status); }
                 if !self.error.is_empty() { ui.label(&self.error); }
                 if let Some(time) = self.fetched {
-                    ui.small(format!("Snapshot received {} · Tradier data may be delayed; Greeks update approximately hourly. Bracketed prices are × 100 before fees; adjusted contracts may differ. Select a strike or last price to open its chart.", time.format("%b %-d, %I:%M:%S %p")));
+                    ui.small(format!("Snapshot received {} · Bid/ask and last prices update from the shared market stream. Greeks remain snapshot values. Tradier data may be delayed. Bracketed prices are × 100 before fees; adjusted contracts may differ. Select a strike or last price to open its chart.", time.format("%b %-d, %I:%M:%S %p")));
                     if self.contracts.is_empty() { ui.label("No contracts returned for this expiration."); }
                 }
                 ui.add_space(8.0);
@@ -804,6 +888,7 @@ impl OptionsView {
                 });
             });
         self.open = open;
+        if !open { self.live = None; }
         picked
     }
 }
@@ -848,6 +933,32 @@ mod tests {
             columns: default_columns(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn live_quote_and_trade_events_update_the_displayed_chain() {
+        let (watcher, live) = crate::options_stream::Watcher::new(vec!["SPY_CALL".into()], egui::Context::default());
+        let mut view = view();
+        view.live = Some(live);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, view: &mut OptionsView| { view.show(ui.ctx(), Settings::default()); }, view);
+        h.run_steps(3);
+        watcher.push(&tradecraft_providers::shared_stream::StreamEvent::Trade {
+            symbol: "SPY_CALL".into(),
+            trade: tradecraft_core::Trade { timestamp_ms: 1751376600000, price: 3.5, size: 2.0 }, volume: Some(100.0),
+        });
+        watcher.push(&tradecraft_providers::shared_stream::StreamEvent::Quote {
+            symbol: "SPY_CALL".into(),
+            bid: Some(tradecraft_providers::shared_stream::QuoteSide { price: 3.4, size: Some(5.0), timestamp_ms: 1751376600000, exchange: None }),
+            ask: Some(tradecraft_providers::shared_stream::QuoteSide { price: 3.6, size: Some(6.0), timestamp_ms: 1751376600000, exchange: None }),
+        });
+        h.run_steps(3);
+        for label in ["$3.50 ($350.00)", "$3.40 ($340.00)", "$3.60 ($360.00)"] {
+            assert!(h.query_by_label(label).is_some(), "missing live price {label}");
+        }
+        h.state_mut().open = false;
+        h.run_steps(2);
+        assert!(watcher.state.upgrade().is_none(), "closing the chain must end its subscription");
     }
 
     #[test]
