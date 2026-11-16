@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stream options-chain bid/ask and last prices over the shared Tradier connection, preserve the table during snapshot refreshes, and release chain subscriptions when closed.
+
 - Add Linux Tradier token storage in the desktop Secret Service keyring, Linux application-data paths, and platform-specific credential-storage descriptions.
 
 ## 0.4.0 — alpha

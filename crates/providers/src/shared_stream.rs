@@ -5,19 +5,67 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tradecraft_core::Trade;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+pub struct QuoteSide {
+    pub price: f64,
+    pub size: Option<f64>,
+    pub timestamp_ms: i64,
+    pub exchange: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub enum StreamEvent {
-    Trade { symbol: String, trade: Trade },
-    Status { connected: bool, message: String },
+    Trade {
+        symbol: String,
+        trade: Trade,
+        volume: Option<f64>,
+    },
+    Quote {
+        symbol: String,
+        bid: Option<QuoteSide>,
+        ask: Option<QuoteSide>,
+    },
+    Status {
+        connected: bool,
+        message: String,
+    },
     RejectedSymbol(String),
 }
 
 fn subscription(session: &str, symbols: &[String]) -> Message {
     Message::Text(
-        json!({"symbols":symbols,"filter":["trade"],"sessionid":session,"linebreak":true})
+        json!({"symbols":symbols,"filter":["trade", "quote"],"sessionid":session,"linebreak":true})
             .to_string()
             .into(),
     )
+}
+
+fn number(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+}
+
+fn quote_side(
+    value: &Value,
+    side: &str,
+    size: &str,
+    date: &str,
+    exchange: &str,
+) -> Option<QuoteSide> {
+    let timestamp_ms = value[date]
+        .as_i64()
+        .or_else(|| value[date].as_str()?.parse().ok())?;
+    if timestamp_ms <= 0 || chrono::DateTime::from_timestamp_millis(timestamp_ms).is_none() {
+        return None;
+    }
+    Some(QuoteSide {
+        price: number(&value[side])?,
+        size: number(&value[size]),
+        timestamp_ms,
+        exchange: value[exchange].as_str().map(str::to_owned),
+    })
 }
 
 fn decode(text: &str) -> Vec<StreamEvent> {
@@ -41,12 +89,30 @@ fn decode(text: &str) -> Vec<StreamEvent> {
                     message: "Tradier rejected the stream subscription".into(),
                 });
             }
+            let symbol = value["symbol"].as_str()?.to_owned();
+            if value["type"] == "quote" {
+                let bid = quote_side(&value, "bid", "bidsz", "biddate", "bidexch");
+                let ask = quote_side(&value, "ask", "asksz", "askdate", "askexch");
+                return (bid.is_some() || ask.is_some()).then_some(StreamEvent::Quote {
+                    symbol,
+                    bid,
+                    ask,
+                });
+            }
             if value["type"] != "trade" {
                 return None;
             }
-            let symbol = value["symbol"].as_str()?.to_owned();
             let trade = crate::market::parse_trade(&value)?;
-            Some(StreamEvent::Trade { symbol, trade })
+            if trade.timestamp_ms <= 0
+                || chrono::DateTime::from_timestamp_millis(trade.timestamp_ms).is_none()
+            {
+                return None;
+            }
+            Some(StreamEvent::Trade {
+                symbol,
+                trade,
+                volume: number(&value["cvol"]),
+            })
         })
         .collect()
 }
@@ -191,8 +257,31 @@ mod tests {
         let json: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(json["symbols"], json!(["SPY", "TSLA"]));
         assert_eq!(json["sessionid"], "session");
-        assert_eq!(json["filter"], json!(["trade"]));
+        assert_eq!(json["filter"], json!(["trade", "quote"]));
     }
+    #[test]
+    fn decodes_option_quote_sides_independently_and_accepts_zero_bids() {
+        let events = decode(
+            r#"{"type":"quote","symbol":"SPY270115C00500000","bid":"0","bidsz":2,"biddate":"1751376600000","ask":3.2,"asksz":"4","askdate":"1751376600100"}"#,
+        );
+        assert!(
+            matches!(&events[0], StreamEvent::Quote { symbol, bid: Some(bid), ask: Some(ask) }
+            if symbol == "SPY270115C00500000" && bid.price == 0.0 && ask.price == 3.2 && ask.size == Some(4.0))
+        );
+        let events = decode(
+            r#"{"type":"quote","symbol":"SPY270115C00500000","bid":"NaN","biddate":"1751376600000","ask":3.2,"askdate":"1751376600100"}"#,
+        );
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Quote {
+                bid: None,
+                ask: Some(_),
+                ..
+            }
+        ));
+        assert!(decode(r#"{"type":"quote","symbol":"SPY","bid":-1,"biddate":"bad"}"#).is_empty());
+    }
+
     #[test]
     fn decodes_batched_trades_and_rejects_bad_values() {
         let result = decode(
@@ -200,7 +289,7 @@ mod tests {
         );
         assert_eq!(result.len(), 1);
         assert!(
-            matches!(&result[0], StreamEvent::Trade { symbol, trade } if symbol == "SPY" && trade.price == 100.0)
+            matches!(&result[0], StreamEvent::Trade { symbol, trade, .. } if symbol == "SPY" && trade.price == 100.0)
         );
         assert!(
             matches!(&decode("{\"error\":\"BAD is not a valid symbol\"}")[0], StreamEvent::RejectedSymbol(symbol) if symbol == "BAD")
@@ -232,19 +321,25 @@ mod tests {
                 ..
             })
         ));
-        symbols_tx.send(vec!["SPY".into(), "TSLA".into()]).unwrap();
+        let option = "SPY270115C00500000";
+        symbols_tx.send(vec!["SPY".into(), option.into()]).unwrap();
         let Message::Text(second) = server.next().await.unwrap().unwrap() else {
             panic!("updated subscription")
         };
         let second: Value = serde_json::from_str(&second).unwrap();
-        assert_eq!(second["symbols"], json!(["SPY", "TSLA"]));
+        assert_eq!(second["symbols"], json!(["SPY", option]));
+        assert_eq!(second["filter"], json!(["trade", "quote"]));
         assert_eq!(second["sessionid"], "same-session");
-        for symbol in ["SPY", "TSLA"] {
+        for symbol in ["SPY", option] {
             server.send(Message::Text(json!({"type":"trade","symbol":symbol,"price":100,"size":1,"date":"1751376600000"}).to_string().into())).await.unwrap();
             assert!(
                 matches!(events_rx.recv().await, Some(StreamEvent::Trade { symbol: received, .. }) if received == symbol)
             );
         }
+        server.send(Message::Text(json!({"type":"quote","symbol":option,"bid":3.4,"biddate":"1751376600000","ask":3.6,"askdate":"1751376600001"}).to_string().into())).await.unwrap();
+        assert!(
+            matches!(events_rx.recv().await, Some(StreamEvent::Quote { symbol, bid: Some(bid), ask: Some(ask) }) if symbol == option && bid.price == 3.4 && ask.price == 3.6)
+        );
         task.abort();
     }
 

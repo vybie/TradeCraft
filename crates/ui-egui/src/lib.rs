@@ -13,6 +13,7 @@
 
 mod terminal_app;
 mod options_view;
+mod options_stream;
 mod pine_engine;
 mod pine_editor;
 mod terminal_feed;

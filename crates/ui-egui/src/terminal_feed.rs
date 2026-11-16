@@ -36,6 +36,9 @@ pub(crate) struct State {
     pub(crate) calendar_overrides: std::collections::BTreeMap<chrono::NaiveDate, egui_charts::model::SessionOverride>,
 }
 impl Feed {
+    pub(crate) fn options_stream(&self, symbols: Vec<String>, ctx: egui::Context) -> Option<Arc<Mutex<crate::options_stream::State>>> {
+        self.tradier.as_ref()?.options(symbols, ctx)
+    }
     pub fn new(settings: Settings) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let tradier = (settings.provider == Provider::Tradier)

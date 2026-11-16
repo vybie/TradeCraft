@@ -19,6 +19,7 @@ static STREAM_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 enum Command {
     Chart(Box<Subscription>),
     Quotes(Vec<String>, Events<(String, Quote)>),
+    Options(crate::options_stream::Watcher),
     Stop,
     #[cfg(all(test, feature = "vibestrader-credential"))]
     SimulateReconnect {
@@ -66,6 +67,11 @@ impl TradierHub {
     }
     pub fn stop(&self) {
         let _ = self.commands.send(Command::Stop);
+    }
+    pub(crate) fn options(&self, symbols: Vec<String>, ctx: egui::Context) -> Option<Arc<Mutex<crate::options_stream::State>>> {
+        let (watcher, state) = crate::options_stream::Watcher::new(symbols, ctx);
+        self.commands.send(Command::Options(watcher)).ok()?;
+        Some(state)
     }
     #[cfg(all(test, feature = "vibestrader-credential"))]
     pub fn simulate_reconnect(&self, since: DateTime<Utc>, cutoff: DateTime<Utc>) {
@@ -199,6 +205,8 @@ async fn run(
     let mut calendar_retry = HashMap::new();
     let mut charts: Vec<Chart> = Vec::new();
     let mut watchers: Vec<Watcher> = Vec::new();
+    let mut option_watchers: Vec<crate::options_stream::Watcher> = Vec::new();
+    let mut snapshot_symbols = Vec::<String>::new();
     let mut quotes: HashMap<String, Quote> = HashMap::new();
     let mut rejected_symbols = HashSet::new();
     let mut current = Vec::new();
@@ -245,6 +253,10 @@ async fn run(
                     for symbol in &symbols { if let Some(quote) = quotes.get(symbol) { events.push((symbol.clone(), quote.clone())); } }
                     watchers.push(Watcher { symbols, events });
                 },
+                Some(Command::Options(watcher)) => {
+                    watcher.push(&StreamEvent::Status { connected, message: if connected { "Live option quotes".into() } else { "Connecting option quotes…".into() } });
+                    option_watchers.push(watcher);
+                },
                 #[cfg(all(test, feature = "vibestrader-credential"))]
                 Some(Command::SimulateReconnect { since, cutoff }) => {
                     outage_since = Some(since);
@@ -253,7 +265,9 @@ async fn run(
                 },
                 Some(Command::Stop) | None => break,
             },
-            event = stream_rx.recv() => match event {
+            event = stream_rx.recv() => {
+                if let Some(event) = &event { for watcher in &option_watchers { watcher.push(event); } }
+                match event {
                 Some(StreamEvent::Status { connected: is_connected, message }) => {
                     let now = Utc::now();
                     if !is_connected && ever_connected {
@@ -301,10 +315,11 @@ async fn run(
                     if let Ok(mut state) = state.lock() {
                         state.status = if connected && charts.iter().any(|chart| chart.recovery.is_some()) { "Stream connected · restoring chart history…".into() } else { message };
                     }
-                    if connected && ever_connected && !current.is_empty() { request_snapshot(&token, current.clone(), snapshot_tx.clone()); }
+                    if connected && ever_connected && !snapshot_symbols.is_empty() { request_snapshot(&token, snapshot_symbols.clone(), snapshot_tx.clone()); }
                     ever_connected |= connected;
                 },
-                Some(StreamEvent::Trade { symbol, trade }) => {
+                Some(StreamEvent::Trade { symbol, trade, .. }) => {
+                    if !charts.iter().any(|chart| chart.sub.symbol == symbol) && !watchers.iter().any(|watcher| watcher.symbols.contains(&symbol)) { continue; }
                     let Some(time) = chrono::DateTime::<Utc>::from_timestamp_millis(trade.timestamp_ms) else { continue; };
                     let eastern = time.with_timezone(&chrono_tz::America::New_York);
                     let key = (eastern.year(), eastern.month());
@@ -391,6 +406,7 @@ async fn run(
                         && let Ok(mut state) = state.lock()
                     { state.status = message; state.last_price_update = Some(time); }
                 },
+                Some(StreamEvent::Quote { .. }) => {},
                 Some(StreamEvent::RejectedSymbol(symbol)) => {
                     if current.contains(&symbol) {
                         rejected_symbols.insert(symbol.clone());
@@ -399,7 +415,7 @@ async fn run(
                     }
                 },
                 None => break,
-            },
+            } },
             result = snapshot_rx.recv() => if let Some(result) = result {
                 match result {
                     Ok(snapshot) => {
@@ -489,29 +505,33 @@ async fn run(
                 if !charts.iter().any(|chart| super::terminal_feed::is_single_tick(chart.sub.timeframe))
                     && let Ok(mut state) = state.lock() { state.tick_status.clear(); }
                 watchers.retain(|watcher| watcher.events.is_active());
+                option_watchers.retain(|watcher| watcher.state.strong_count() > 0);
                 let mut symbols = BTreeSet::new();
                 for chart in &charts { symbols.insert(chart.sub.symbol.clone()); }
                 for watcher in &watchers { symbols.extend(watcher.symbols.iter().cloned()); }
+                let next_snapshots: Vec<_> = symbols.iter().filter(|symbol| !rejected_symbols.contains(*symbol)).cloned().collect();
+                let new_snapshots: Vec<_> = next_snapshots.iter().filter(|symbol| !snapshot_symbols.contains(symbol)).cloned().collect();
+                snapshot_symbols = next_snapshots;
+                if !new_snapshots.is_empty() { request_snapshot(&token, new_snapshots, snapshot_tx.clone()); }
+                for watcher in &option_watchers { symbols.extend(watcher.symbols.iter().cloned()); }
                 rejected_symbols.retain(|symbol| symbols.contains(symbol));
                 if rejected_symbols.is_empty() && let Ok(mut state) = state.lock()
                     && state.watchlist_error.starts_with("Tradier rejected symbol ") { state.watchlist_error.clear(); }
                 symbols.retain(|symbol| !rejected_symbols.contains(symbol));
                 let next: Vec<_> = symbols.into_iter().collect();
                 if next != current {
-                    let new_symbols: Vec<_> = next.iter().filter(|symbol| !current.contains(symbol)).cloned().collect();
                     current = next.clone();
                     quotes.retain(|symbol, _| current.contains(symbol));
                     let _ = symbols_tx.send(next);
-                    if !new_symbols.is_empty() { request_snapshot(&token, new_symbols, snapshot_tx.clone()); }
                 }
                 let today = Utc::now().with_timezone(&chrono_tz::America::New_York).date_naive();
                 if today != snapshot_day {
                     snapshot_day = today;
-                    if !current.is_empty() { request_snapshot(&token, current.clone(), snapshot_tx.clone()); }
+                    if !snapshot_symbols.is_empty() { request_snapshot(&token, snapshot_symbols.clone(), snapshot_tx.clone()); }
                 }
                 if snapshot_retry.is_some_and(|retry| std::time::Instant::now() >= retry) {
                     snapshot_retry = None;
-                    if !current.is_empty() { request_snapshot(&token, current.clone(), snapshot_tx.clone()); }
+                    if !snapshot_symbols.is_empty() { request_snapshot(&token, snapshot_symbols.clone(), snapshot_tx.clone()); }
                 }
                 if connected {
                     let now = Utc::now();
