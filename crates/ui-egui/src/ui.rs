@@ -374,7 +374,7 @@ impl TradeCraft {
                                 ui.add_space(8.0);
                                 let label = ui.label("Tradier production token");
                                 ui.add(egui::TextEdit::singleline(&mut self.token).password(true).desired_width(340.0).hint_text("Enter token or leave blank to keep saved token")).labelled_by(label.id);
-                                ui.label(RichText::new("Saved in Windows Credential Locker. Leave blank to keep your existing token.").small().color(MUTED));
+                                ui.label(RichText::new(tradecraft_providers::credentials::storage_description()).small().color(MUTED));
                             }
                         }
                     }

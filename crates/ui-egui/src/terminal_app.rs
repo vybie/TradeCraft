@@ -639,7 +639,7 @@ impl TerminalApp {
                                     .hint_text("Leave blank to keep the saved token"),
                             )
                             .labelled_by(label.id);
-                            ui.label("Stored in Windows Credential Locker.");
+                            ui.label(tradecraft_providers::credentials::storage_description());
                         }
                     }
                     if !self.error.is_empty() {

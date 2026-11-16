@@ -5,9 +5,21 @@ use std::path::PathBuf;
 pub fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    let base = linux_data_base(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
     Some(base.join("TradeCraft"))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_data_base(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    xdg.map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".local/share")))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -65,6 +77,21 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_uses_absolute_xdg_or_home_fallback() {
+        assert_eq!(
+            linux_data_base(Some("/data".into()), None),
+            Some(PathBuf::from("/data"))
+        );
+        for xdg in [None, Some("".into()), Some("relative".into())] {
+            assert_eq!(
+                linux_data_base(xdg, Some("/home/test".into())),
+                Some(PathBuf::from("/home/test/.local/share"))
+            );
+        }
+        assert_eq!(linux_data_base(None, None), None);
+    }
     #[test]
     fn personal_setting_is_only_enabled_in_personal_builds() {
         let settings = Settings::from_json(&json!({"provider":"tradier", "use_vibestrader":true}));

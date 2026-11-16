@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Linux Tradier token storage in the desktop Secret Service keyring, Linux application-data paths, and platform-specific credential-storage descriptions.
+
 ## 0.4.0 — alpha
 
 - Add a read-only Tradier options chain with expiration selection, calls and puts, configurable columns, quotes and available Greeks; open a contract in a chart tab.
