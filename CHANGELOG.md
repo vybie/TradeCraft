@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stream options-chain bid/ask and last prices over the shared Tradier connection, preserve the table during snapshot refreshes, and release chain subscriptions when closed.
+
 ## 0.4.0 — alpha
 
 - Add a read-only Tradier options chain with expiration selection, calls and puts, configurable columns, quotes and available Greeks; open a contract in a chart tab.

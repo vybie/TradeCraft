@@ -601,7 +601,7 @@ impl TerminalApp {
             }
         }
         self.pine.show(ui.ctx(), self.terminal.chart_mut());
-        if let Some(symbol) = self.options.show(ui.ctx(), self.settings) {
+        if let Some(symbol) = self.options.show_with_feed(ui.ctx(), self.settings, Some(&self.feed)) {
             self.terminal.open_symbol_tab(&symbol);
         }
         if self.pine.revision != self.pine_catalog_revision {
