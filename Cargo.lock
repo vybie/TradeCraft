@@ -4187,6 +4187,8 @@ dependencies = [
  "tradecraft-engine",
  "tradecraft-providers",
  "tray-icon",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]

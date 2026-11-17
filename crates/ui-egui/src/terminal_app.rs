@@ -229,6 +229,13 @@ impl TerminalApp {
     pub(crate) fn init_tray(&mut self, ctx: &egui::Context) {
         #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         {
+            // Native Wayland cannot hide or restore windows with winit. In that
+            // environment keep the normal close-and-save flow instead of trapping
+            // a running application with an inaccessible window.
+            #[cfg(target_os = "linux")]
+            if !crate::linux_uses_x11() {
+                return;
+            }
             self.tray = tray::Tray::new(ctx);
         }
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]

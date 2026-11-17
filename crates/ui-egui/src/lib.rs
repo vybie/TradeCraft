@@ -336,6 +336,18 @@ fn chart_timeframe(interval: Interval) -> Timeframe {
         Interval::OneMonth => Timeframe::Month1,
     }
 }
+#[cfg(target_os = "linux")]
+fn linux_uses_x11() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let force_wayland = std::env::var("WINIT_UNIX_BACKEND")
+            .is_ok_and(|backend| backend.eq_ignore_ascii_case("wayland"));
+        !force_wayland
+            && std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty())
+            && x11rb::connect(None).is_ok()
+    })
+}
+
 pub fn run() -> eframe::Result {
     if std::env::args().any(|arg| arg == "--commands") {
         for command in tradecraft_engine::WORKSPACE_COMMANDS {
@@ -378,6 +390,18 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "TradeCraft",
         eframe::NativeOptions {
+            // winit cannot hide or restore a Wayland toplevel. Prefer XWayland when
+            // available so the tray can reliably reopen the window and the desktop
+            // supplies its normal window decorations.
+            #[cfg(target_os = "linux")]
+            event_loop_builder: if linux_uses_x11() {
+                Some(Box::new(|builder| {
+                    use winit::platform::x11::EventLoopBuilderExtX11;
+                    builder.with_x11();
+                }))
+            } else {
+                None
+            },
             viewport: window_settings
                 .viewport()
                 .with_min_inner_size([640.0, 480.0])

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix Linux close-to-tray on Wayland desktops by using XWayland where available, with a safe quit fallback for native Wayland.
+
 - Add close-to-tray support on Linux and macOS, including safe Linux fallback when no tray host is available.
 
 - Stream options-chain bid/ask and last prices over the shared Tradier connection, preserve the table during snapshot refreshes, and release chain subscriptions when closed.
