@@ -144,6 +144,14 @@
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
+    "crossbeam-channel@0.5.17": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "crossbeam-utils@0.8.23": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
     "crypto-common@0.1.7": {
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -444,6 +452,10 @@
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
+    "keyboard-types@0.8.3": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
     "kurbo@0.11.3": {
       "license": "Apache-2.0 OR MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -502,6 +514,10 @@
     },
     "moxcms@0.8.1": {
       "license": "BSD-3-Clause OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "muda@0.21.2": {
+      "license": "Apache-2.0 OR MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "naga-types@30.0.1": {
@@ -927,6 +943,10 @@
     "tradecraft@0.4.0": {
       "license": "MIT",
       "source": "workspace/path"
+    },
+    "tray-icon@0.26.1": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "try-lock@0.2.5": {
       "license": "MIT",
@@ -1246,6 +1266,14 @@
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
+    "crossbeam-channel@0.5.17": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "crossbeam-utils@0.8.23": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
     "crypto-common@0.1.7": {
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1546,6 +1574,10 @@
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
+    "keyboard-types@0.8.3": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
     "kurbo@0.11.3": {
       "license": "Apache-2.0 OR MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1604,6 +1636,10 @@
     },
     "moxcms@0.8.1": {
       "license": "BSD-3-Clause OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
+    },
+    "muda@0.21.2": {
+      "license": "Apache-2.0 OR MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "naga-types@30.0.1": {
@@ -2029,6 +2065,10 @@
     "tradecraft@0.4.0": {
       "license": "MIT",
       "source": "workspace/path"
+    },
+    "tray-icon@0.26.1": {
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "try-lock@0.2.5": {
       "license": "MIT",
