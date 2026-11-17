@@ -102,6 +102,8 @@ impl WindowSettings {
         let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([self.geometry.width, self.geometry.height])
             .with_maximized(self.geometry.maximized);
+        #[cfg(target_os = "linux")]
+        { viewport = viewport.with_app_id("tradecraft"); }
         if let Some(position) = self.geometry.position { viewport = viewport.with_position(position); }
         viewport
     }

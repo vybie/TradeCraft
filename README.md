@@ -30,7 +30,7 @@ Closing the window keeps TradeCraft running in the notification area (Windows an
 
 ### Linux
 
-Run `cargo run --release`. Settings and chart data are saved under `$XDG_DATA_HOME/TradeCraft`, or `~/.local/share/TradeCraft` when `XDG_DATA_HOME` is unset or not absolute.
+Run `cargo run --release`. After building, run `python3 scripts/install-linux-desktop.py` to install the application launcher and correct dock icon for this checkout. Settings and chart data are saved under `$XDG_DATA_HOME/TradeCraft`, or `~/.local/share/TradeCraft` when `XDG_DATA_HOME` is unset or not absolute.
 
 To use Tradier, run in a desktop session with a Secret Service keyring such as GNOME Keyring or KWallet. Ensure a default keyring exists and is unlocked. Open the TradeCraft icon menu → Market data settings, select **Tradier · production token**, enter your token, and click **Save settings**. Leave the token field blank on later saves to keep the saved token. The production token is stored in the default desktop keyring, shared by personal and community configurations; provider settings stay separate. No token is written to the settings files. The app reports an error if the keyring is unavailable or locked, without falling back to a plaintext file or a temporary session collection. The VibesTrader credential shortcut remains Windows-only.
 
