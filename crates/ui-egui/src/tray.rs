@@ -18,6 +18,7 @@ pub(super) struct Tray {
 }
 
 impl Tray {
+    pub(super) fn available(&self) -> bool { true }
     pub(super) fn new(ctx: &egui::Context) -> Option<Self> {
         match Self::create(ctx) {
             Ok(tray) => Some(tray),

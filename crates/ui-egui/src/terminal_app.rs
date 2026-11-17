@@ -147,8 +147,11 @@ fn indicator_factory(
     }
     factory
 }
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[path = "tray.rs"]
+mod tray;
+#[cfg(target_os = "linux")]
+#[path = "tray_linux.rs"]
 mod tray;
 pub struct TerminalApp {
     terminal: Terminal,
@@ -165,7 +168,7 @@ pub struct TerminalApp {
     error: String,
     quit: QuitState,
     window_settings: WindowSettings,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     tray: Option<tray::Tray>,
     menu_icon: Option<egui::TextureHandle>,
     pine: crate::pine_editor::PineEditor,
@@ -215,7 +218,7 @@ impl TerminalApp {
             alert_error,
             quit: QuitState::Idle,
             window_settings,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
             tray: None,
             menu_icon: None,
             pine,
@@ -224,11 +227,11 @@ impl TerminalApp {
         }
     }
     pub(crate) fn init_tray(&mut self, ctx: &egui::Context) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         {
             self.tray = tray::Tray::new(ctx);
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         let _ = ctx;
     }
     fn make_terminal(
@@ -331,18 +334,22 @@ impl eframe::App for TerminalApp {
             Err(error) => self.alert_error = error,
         }
         self.window_settings.observe(ctx);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         if let Some(tray) = &mut self.tray {
             let quit_requested = tray.pump(ctx);
+            let tray_available = tray.available();
             if quit_requested {
                 self.begin_quit(ctx);
             }
-            if ctx.input(|i| i.viewport().close_requested()) && matches!(self.quit, QuitState::Idle)
+            if tray_available && ctx.input(|i| i.viewport().close_requested()) && matches!(self.quit, QuitState::Idle)
             {
                 let _ = self.window_settings.flush();
                 let _ = self.terminal.flush_storage();
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                #[cfg(windows)]
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                #[cfg(not(windows))]
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 return;
             }
         }
