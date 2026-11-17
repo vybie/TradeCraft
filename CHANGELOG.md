@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Install a Linux desktop launcher and identify the window so desktop docks show the TradeCraft icon.
+
 - Fix Linux close-to-tray on Wayland desktops by using XWayland where available, with a safe quit fallback for native Wayland.
 
 - Add close-to-tray support on Linux and macOS, including safe Linux fallback when no tray host is available.
