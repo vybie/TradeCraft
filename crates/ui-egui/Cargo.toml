@@ -27,6 +27,8 @@ tray-icon = { version = "=0.26.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+winit = { version = "0.30.13", default-features = false, features = ["x11"] }
+x11rb = "0.13.2"
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu"] }
