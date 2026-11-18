@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep chart prices updating during Tradier reconnect recovery, then reconcile provisional candles without double-counting buffered volume.
+
 - Install a Linux desktop launcher and identify the window so desktop docks show the TradeCraft icon.
 
 - Fix Linux close-to-tray on Wayland desktops by using XWayland where available, with a safe quit fallback for native Wayland.

@@ -1615,6 +1615,32 @@ mod tests {
         assert_eq!(quote.change_percent(), 10.0);
     }
 
+    #[test]
+    #[ignore = "uses the saved TradeCraft Tradier credential and opens the account's market stream; run during market hours with other streams closed"]
+    fn live_spy_chart_and_watchlist_follow_same_trades() {
+        use egui_charts::widget::SeriesId;
+        let feed = Arc::new(Feed::new(Settings { provider: Provider::Tradier, use_vibestrader: false }));
+        let mut terminal = Terminal::new(feed.clone()).with_symbol("SPY")
+            .with_timeframe(Timeframe::Min5).with_quotes(feed.clone());
+        terminal.panels_mut().watchlist.add_symbol("SPY");
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 760.0))
+            .build_ui_state(|ui, terminal: &mut Terminal| { terminal.show(ui); }, terminal);
+        let mut initial = None;
+        for _ in 0..400 {
+            h.step();
+            let chart = h.state().chart().bars(SeriesId::MAIN).last().map(|bar| bar.close);
+            let quote = h.state_mut().panels_mut().watchlist.quote("SPY").map(|quote| quote.last);
+            if let (Some(chart), Some(quote)) = (chart, quote) {
+                let first = *initial.get_or_insert(chart);
+                if chart != first && (chart - quote).abs() < 0.000_001 {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("SPY chart and watchlist did not follow the same live trade; status: {}", feed.status());
+    }
+
     #[cfg(feature = "vibestrader-credential")]
     #[test]
     #[ignore = "requires the saved personal Tradier credential and network access"]

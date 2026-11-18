@@ -182,9 +182,53 @@ pub fn reconcile(
     bars
 }
 
+/// Replace provisional live candles with a history baseline plus each buffered trade once.
+/// Ticks have already been displayed, so replaying them through the sink would be rejected
+/// as late or counted twice. Build replacement bars instead.
+pub fn merge_live_after_recovery(
+    bars: Vec<Bar>,
+    ticks: &mut [egui_charts::model::Tick],
+    clock: &BarClock,
+    interval: Interval,
+    cutoff: DateTime<Utc>,
+) -> Vec<Bar> {
+    let mut merged: std::collections::BTreeMap<_, _> = bars.into_iter()
+        .map(|bar| (slot(clock, interval, bar.time), bar)).collect();
+    ticks.sort_by_key(|tick| tick.ts);
+    for tick in ticks.iter().filter(|tick| tick.ts >= cutoff) {
+        let time = slot(clock, interval, tick.ts);
+        if let Some(bar) = merged.get_mut(&time) {
+            bar.high = bar.high.max(tick.price);
+            bar.low = bar.low.min(tick.price);
+            bar.close = tick.price;
+            bar.volume += tick.size;
+        } else {
+            merged.insert(time, Bar::new(time, tick.price, tick.price, tick.price, tick.price, tick.size));
+        }
+    }
+    merged.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_merges_visible_live_ticks_once_across_candle_boundaries() {
+        let start = DateTime::parse_from_rfc3339("2026-11-18T20:45:00Z").unwrap().to_utc();
+        let cutoff = start + Duration::minutes(3);
+        let clock = BarClock::new(Timeframe::Min5);
+        let history = vec![Bar::new(start, 100.0, 104.0, 99.0, 103.0, 30.0)];
+        let mut ticks = vec![
+            egui_charts::model::Tick::new(start + Duration::minutes(5), 107.0, 3.0, None),
+            egui_charts::model::Tick::new(cutoff + Duration::seconds(1), 105.0, 2.0, None),
+            egui_charts::model::Tick::new(cutoff - Duration::seconds(1), 999.0, 1000.0, None),
+            egui_charts::model::Tick::new(cutoff + Duration::seconds(30), 102.0, 4.0, None),
+        ];
+        let result = merge_live_after_recovery(history, &mut ticks, &clock, Interval::FiveMinutes, cutoff);
+        assert_eq!(result.len(), 2);
+        assert_eq!((result[0].open, result[0].high, result[0].low, result[0].close, result[0].volume), (100.0, 105.0, 99.0, 102.0, 36.0));
+        assert_eq!((result[1].open, result[1].close, result[1].volume), (107.0, 107.0, 3.0));
+    }
     #[test]
     fn weekly_and_monthly_recovery_joins_completed_days_and_current_minutes() {
         let time = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
@@ -352,6 +396,29 @@ mod tests {
             (bar.open, bar.high, bar.low, bar.close, bar.volume),
             (100.0, 104.0, 99.0, 104.0, 18.0)
         );
+        // During a second recovery, live trades must remain visible before the
+        // delayed history arrives, and replacement must count them only once.
+        sink.set_status(egui_charts::data::FeedStatus::Connecting);
+        let cutoff = start + Duration::seconds(3);
+        let mut buffered = vec![
+            Tick::new(start + Duration::seconds(4), 105.0, 4.0, None),
+            Tick::new(start + Duration::seconds(5), 106.0, 5.0, None),
+        ];
+        for tick in &buffered { sink.push_tick(tick.clone()); }
+        h.run_steps(2);
+        assert_eq!(h.state().bars(SeriesId::MAIN).last().unwrap().close, 106.0);
+        let reconciled = merge_live_after_recovery(
+            vec![Bar::new(start, 100.0, 104.0, 99.0, 104.0, 18.0)],
+            &mut buffered, &BarClock::new(Timeframe::Min5), Interval::FiveMinutes, cutoff,
+        );
+        for bar in reconciled { sink.push_bar(crate::terminal_feed::chart_bar(bar)); }
+        h.run_steps(2);
+        let bar = h.state().bars(SeriesId::MAIN).last().unwrap();
+        assert_eq!((bar.open, bar.high, bar.low, bar.close, bar.volume), (100.0, 106.0, 99.0, 106.0, 27.0));
+        sink.push_tick(Tick::new(start + Duration::seconds(6), 107.0, 1.0, None));
+        h.run_steps(2);
+        let bar = h.state().bars(SeriesId::MAIN).last().unwrap();
+        assert_eq!((bar.close, bar.volume), (107.0, 28.0));
     }
 
     #[test]
