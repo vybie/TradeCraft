@@ -375,6 +375,9 @@ async fn run(
                                 }
                             }
                             if let Some(recovery) = &mut chart.recovery && time >= recovery.cutoff {
+                                // Keep the chart moving while history catches up. These are
+                                // provisional and replaced by reconciled bars after recovery.
+                                chart.sub.sink.push_tick(tick.clone());
                                 if recovery.buffered.len() >= MAX_BUFFERED_TICKS {
                                     recovery_generation = recovery_generation.wrapping_add(1);
                                     recovery.generation = recovery_generation;
@@ -384,8 +387,10 @@ async fn run(
                                     recovery.retry_at = None;
                                     recovery.buffered.clear();
                                     recovery.observed_minutes.clear();
+                                    let minute = time.timestamp().div_euclid(60) * 60;
+                                    if let Some(minute) = DateTime::<Utc>::from_timestamp(minute, 0) { recovery.observed_minutes.insert(minute); }
                                     if let Ok(mut state) = state.lock() { state.status = "History recovery restarting after high activity".into(); }
-                                } else { recovery.buffered.push(tick); }
+                                } else if recovery.buffered.last().is_none_or(|previous| tick.ts >= previous.ts) { recovery.buffered.push(tick); }
                             } else {
                                 if let Some(recovery) = &mut chart.recovery
                                     && let Some(interval) = crate::tradier_backfill::interval(chart.sub.timeframe)
@@ -451,9 +456,9 @@ async fn run(
                             if let Ok(mut state) = state.lock() { state.status = "Waiting for Tradier history to catch up; retrying".into(); }
                         },
                         (BackfillStage::Reconcile, Ok(data)) => {
-                            for bar in data.bars { chart.sub.sink.push_bar(super::terminal_feed::chart_bar(bar)); }
-                            recovery.buffered.sort_by_key(|tick| tick.ts);
-                            for tick in recovery.buffered.drain(..) { chart.sub.sink.push_tick(tick); }
+                            let Some(interval) = crate::tradier_backfill::interval(chart.sub.timeframe) else { continue; };
+                            let bars = crate::tradier_backfill::merge_live_after_recovery(data.bars, &mut recovery.buffered, &chart.sub.clock, interval, recovery.cutoff);
+                            for bar in bars { chart.sub.sink.push_bar(super::terminal_feed::chart_bar(bar)); }
                             let truncated = recovery.truncated;
                             chart.recovered_before = data.covered_minutes.iter().max().map(|minute| *minute + chrono::Duration::minutes(1));
                             chart.recovery = None;
