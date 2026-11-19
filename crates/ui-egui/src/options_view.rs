@@ -8,7 +8,6 @@ use tradecraft_providers::{
     settings::{Provider, Settings},
 };
 
-const ORANGE: egui::Color32 = egui::Color32::from_rgb(255, 100, 0);
 const ROW_HEIGHT: f32 = 44.0;
 
 enum ResultMessage {
@@ -545,23 +544,29 @@ fn underlying_marker(ui: &mut egui::Ui, price: f64, width: f32) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::hover());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &text));
     let painter = ui.painter();
+    let accent = ui.visuals().selection.bg_fill;
+    let accent_text = ui.visuals().selection.stroke.color;
     painter.hline(
         rect.x_range(),
         rect.center().y,
-        egui::Stroke::new(1.0, ORANGE),
+        egui::Stroke::new(1.0, accent),
     );
     let font = egui::FontId::proportional(14.0);
     let text_size = painter
-        .layout_no_wrap(text.clone(), font.clone(), egui::Color32::BLACK)
+        .layout_no_wrap(text.clone(), font.clone(), accent_text)
         .size();
-    let badge = egui::Rect::from_center_size(rect.center(), egui::vec2(text_size.x + 24.0, 26.0));
-    painter.rect_filled(badge, egui::CornerRadius::same(13), ORANGE);
+    // Anchor the badge near Strike so it remains visible before horizontally scrolling.
+    let badge = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 12.0, rect.center().y - 13.0),
+        egui::vec2(text_size.x + 24.0, 26.0),
+    );
+    painter.rect_filled(badge, egui::CornerRadius::same(13), accent);
     painter.text(
-        rect.center(),
+        badge.center(),
         egui::Align2::CENTER_CENTER,
         text,
         font,
-        egui::Color32::BLACK,
+        accent_text,
     );
 }
 
@@ -569,8 +574,8 @@ fn row_separator(ui: &mut egui::Ui, width: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
     let color = ui
         .visuals()
-        .panel_fill
-        .lerp_to_gamma(ui.visuals().text_color(), 0.35);
+        .window_fill
+        .lerp_to_gamma(ui.visuals().text_color(), 0.18);
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
@@ -764,28 +769,45 @@ impl OptionsView {
         egui::Window::new(format!("Options · {}", self.symbol))
             .open(&mut open).default_size(egui::vec2(width, height)).resizable(true)
             .show(ctx, |ui| {
-                if let Some(quote) = &self.underlying {
-                    let change = quote.last - quote.previous_close;
-                    let percent = if quote.previous_close != 0.0 { change / quote.previous_close * 100.0 } else { 0.0 };
-                    ui.label(egui::RichText::new(format!("{}   ${:.2}  ({:+.2}%)", self.symbol, quote.last, percent)).strong().size(18.0));
-                    ui.small(format!("Underlying quote as of {}", quote.time.with_timezone(&chrono::Local).format("%b %-d, %I:%M:%S %p")));
-                } else {
-                    ui.label(egui::RichText::new(&self.symbol).strong().size(18.0));
-                }
-                ui.add_space(8.0);
-                ui.heading(format!("{} {}", self.symbol, if self.show_puts { "puts" } else { "calls" }));
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let surface = ui.visuals().window_fill.lerp_to_gamma(ui.visuals().text_color(), 0.055);
+                egui::Frame::new().fill(surface).corner_radius(10).inner_margin(egui::Margin::symmetric(16, 12)).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new("UNDERLYING").small().weak().strong());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new(&self.symbol).size(22.0).strong());
+                        if let Some(quote) = &self.underlying {
+                            let change = quote.last - quote.previous_close;
+                            let percent = (quote.previous_close != 0.0).then(|| change / quote.previous_close * 100.0);
+                            ui.label(egui::RichText::new(format!("${:.2}", quote.last)).size(22.0).strong());
+                            if let Some(percent) = percent {
+                                ui.label(egui::RichText::new(format!("{change:+.2}  ({percent:+.2}%)")).strong());
+                            }
+                        }
+                    });
+                    if let Some(quote) = &self.underlying {
+                        ui.label(egui::RichText::new(format!("Last trade · {}", quote.time.with_timezone(&chrono::Local).format("%b %-d, %I:%M:%S %p"))).small().weak());
+                    } else {
+                        ui.label(egui::RichText::new("Underlying quote unavailable").small().weak());
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.heading("Option chain");
+                    let count = self.contracts.iter().filter(|c| c.kind == if self.show_puts { "put" } else { "call" }).count();
+                    if self.fetched.is_some() { ui.label(egui::RichText::new(format!("{count} contracts")).small().weak()); }
+                    ui.label(egui::RichText::new("Select a strike or last price to open its chart").small().weak());
+                });
+                ui.horizontal_wrapped(|ui| {
                     for (label, puts) in [("Calls", false), ("Puts", true)] {
                         let selected = self.show_puts == puts;
-                        let mut button = egui::Button::new(egui::RichText::new(label).size(16.0).color(if selected { egui::Color32::BLACK } else { ORANGE }).strong()).min_size(egui::vec2(95.0, 36.0));
-                        if selected { button = button.fill(ORANGE); }
+                        let button = egui::Button::selectable(selected, egui::RichText::new(label).strong()).min_size(egui::vec2(74.0, 34.0));
                         if ui.add(button).clicked() && !selected { self.show_puts = puts; self.scroll_to_price = true; }
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     let previous = self.expiration.clone();
                     let expiration_label = ui.label("Expiration");
-                    egui::ComboBox::from_id_salt("options_expiration").width(190.0).selected_text(if self.expiration.is_empty() { "Unavailable".into() } else { self.expiration.clone() }).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("options_expiration").width(128.0).selected_text(if self.expiration.is_empty() { "Unavailable".into() } else { self.expiration.clone() }).show_ui(ui, |ui| {
                         for date in &self.expirations { ui.selectable_value(&mut self.expiration, date.clone(), date); }
                     }).response.labelled_by(expiration_label.id);
                     if previous != self.expiration {
@@ -798,7 +820,7 @@ impl OptionsView {
                         self.fetched = None;
                         self.request(settings, true);
                     }
-                    if ui.add_enabled(!self.loading && settings.provider == Provider::Tradier, egui::Button::new("Refresh")).clicked() { self.request(settings, !self.expiration.is_empty()); }
+                    if ui.add_enabled(!self.loading && settings.provider == Provider::Tradier, egui::Button::new("Refresh").min_size(egui::vec2(68.0, 34.0))).on_hover_text("Refresh the options snapshot and Greeks").clicked() { self.request(settings, !self.expiration.is_empty()); }
                     let mut columns_changed = false;
                     ui.menu_button("Columns", |ui| {
                         ui.strong("Options columns");
@@ -817,29 +839,45 @@ impl OptionsView {
                         self.columns_error = save_columns(&self.columns).err().map(|e| format!("Could not save columns: {e}")).unwrap_or_default();
                     }
                 });
-                ui.add_space(8.0);
-                if !self.columns_error.is_empty() { ui.label(&self.columns_error); }
+                if !self.columns_error.is_empty() { ui.colored_label(ui.visuals().error_fg_color, &self.columns_error); }
                 if self.loading { ui.label(if self.fetched.is_some() { "Refreshing options…" } else { "Loading options…" }); }
-                if !self.stream_status.is_empty() { ui.small(&self.stream_status); }
-                if !self.error.is_empty() { ui.label(&self.error); }
+                if !self.stream_status.is_empty() { ui.label(egui::RichText::new(&self.stream_status).small()); }
+                if !self.error.is_empty() {
+                    egui::Frame::new().fill(ui.visuals().error_fg_color.gamma_multiply(0.12)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, &self.error);
+                    });
+                }
                 if let Some(time) = self.fetched {
-                    ui.small(format!("Snapshot received {} · Bid/ask and last prices update from the shared market stream. Greeks remain snapshot values. Tradier data may be delayed. Bracketed prices are × 100 before fees; adjusted contracts may differ. Select a strike or last price to open its chart.", time.format("%b %-d, %I:%M:%S %p")));
+                    ui.label(egui::RichText::new(format!("Snapshot {} · Greeks are snapshot values · Prices may be delayed", time.format("%b %-d, %I:%M:%S %p"))).small().weak());
                     if self.contracts.is_empty() { ui.label("No contracts returned for this expiration."); }
                 }
-                ui.add_space(8.0);
+                ui.collapsing("About prices and charts", |ui| {
+                    ui.label("Bid, ask and last prices update from the market stream when available. The snapshot time is not the time of each quote.");
+                    ui.label("Prices in parentheses are multiplied by 100 before fees; adjusted contracts may differ. Select a strike or last price to open its chart.");
+                });
                 let kind = if self.show_puts { "put" } else { "call" };
                 let mut rows: Vec<_> = self.contracts.iter().filter(|c| c.kind == kind).collect();
                 rows.sort_by(|a, b| b.strike.total_cmp(&a.strike).then_with(|| a.symbol.cmp(&b.symbol)));
+                if rows.is_empty() && !self.contracts.is_empty() && self.fetched.is_some() {
+                    ui.label(format!("No {} available for this expiration.", if self.show_puts { "puts" } else { "calls" }));
+                }
                 let nearest = self.underlying.as_ref().and_then(|quote| rows.iter().enumerate().min_by(|(_, a), (_, b)| (a.strike - quote.last).abs().total_cmp(&(b.strike - quote.last).abs())).map(|(i, _)| i));
                 let marker = self.underlying.as_ref().filter(|_| !rows.is_empty()).map(|quote| marker_index(&rows, quote.last));
                 let scroll = self.scroll_to_price;
                 self.scroll_to_price = false;
-                let visible: Vec<_> = COLUMNS.iter().filter(|column| column.required || self.columns.iter().any(|key| key == column.key)).collect();
+                let compact = ui.available_width() < 900.0;
+                let mut visible: Vec<_> = COLUMNS.iter().filter(|column| column.required || self.columns.iter().any(|key| key == column.key)).collect();
+                if compact {
+                    // Keep the trading-critical columns in view first; all other selected
+                    // columns remain available by scrolling horizontally.
+                    visible.sort_by_key(|column| match column.key { "strike" => 0, "bid" => 1, "ask" => 2, "last" => 3, _ => 4 });
+                    if visible.len() > 4 { ui.label(egui::RichText::new("Scroll horizontally for more columns").small().weak()); }
+                }
                 egui::ScrollArea::horizontal().id_salt("options_horizontal").show(ui, |ui| {
                     let spacing = ui.spacing().item_spacing.x;
                     let count = visible.len();
                     let minimums: Vec<f32> = visible.iter().map(|column| {
-                        let minimum = column_min_width(column);
+                        let minimum = if compact && matches!(column.key, "bid" | "ask" | "last") { 110.0 } else { column_min_width(column) };
                         if matches!(column.key, "bid" | "ask" | "last") {
                             let widest = rows.iter().filter_map(|c| match column.key { "bid" => c.bid, "ask" => c.ask, _ => c.last }).filter(|v| v.is_finite()).max_by(|a, b| a.abs().total_cmp(&b.abs()));
                             let text = contract_price(widest);
@@ -848,18 +886,23 @@ impl OptionsView {
                         } else { minimum }
                     }).collect();
                     let extra = ((ui.available_width() - spacing * (count.saturating_sub(1) as f32) - 24.0 - minimums.iter().sum::<f32>()) / count as f32).max(0.0);
-                    let widths: Vec<f32> = minimums.iter().map(|minimum| minimum + extra).collect();
+                    let mut widths: Vec<f32> = minimums.iter().map(|minimum| minimum + extra).collect();
+                    if compact && visible.len() > 4 && visible.get(3).is_some_and(|c| c.key == "last") {
+                        let first_columns = widths.iter().take(4).sum::<f32>() + spacing * 4.0;
+                        widths[3] += (ui.available_width() - first_columns + 1.0).max(0.0);
+                    }
                     let table_width = widths.iter().sum::<f32>() + spacing * count.saturating_sub(1) as f32;
-                    let header_color = ui.visuals().panel_fill.lerp_to_gamma(ui.visuals().text_color(), 0.12);
-                    egui::Frame::new().fill(header_color).show(ui, |ui| {
+                    let header_color = ui.visuals().window_fill.lerp_to_gamma(ui.visuals().text_color(), 0.055);
+                    egui::Frame::new().fill(header_color).corner_radius(6).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             for (column, width) in visible.iter().zip(&widths) {
-                                ui.add_sized([*width, 36.0], egui::Label::new(egui::RichText::new(column.title).size(16.0).strong()));
+                                ui.add_sized([*width, 36.0], egui::Label::new(egui::RichText::new(column.title).size(14.0).strong()));
                             }
                         });
                     });
                     row_separator(ui, table_width);
                     egui::ScrollArea::vertical().id_salt("options_rows").auto_shrink([false, false]).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         for (index, c) in rows.iter().enumerate() {
                             if marker == Some(index) {
                                 if let Some(quote) = &self.underlying { underlying_marker(ui, quote.last, table_width); }
@@ -868,10 +911,11 @@ impl OptionsView {
                                 for (column, width) in visible.iter().zip(&widths) {
                                     if column.key == "strike" || column.key == "last" {
                                         let text = if column.key == "strike" { dollars(c.strike) } else if c.last.is_some() { contract_price(c.last) } else { "View chart".into() };
-                                        let color = if column.key == "last" { ORANGE } else { ui.visuals().text_color() };
-                                        let mut button = egui::Button::new(egui::RichText::new(text).size(if column.key == "last" { 14.0 } else { 15.0 }).color(color).strong());
-                                        if column.key == "strike" { button = button.frame(false); }
-                                        if ui.add_sized([*width, ROW_HEIGHT], button).on_hover_text(&c.symbol).clicked() { picked = Some(c.symbol.clone()); }
+                                        let color = if column.key == "last" { ui.visuals().hyperlink_color } else { ui.visuals().text_color() };
+                                        let mut rich = egui::RichText::new(text).size(14.0).color(color).strong();
+                                        if column.key == "last" { rich = rich.underline(); }
+                                        let button = egui::Button::new(rich).frame(false);
+                                        if ui.add_sized([*width, ROW_HEIGHT], button).on_hover_text(format!("Open chart for {}", c.symbol)).clicked() { picked = Some(c.symbol.clone()); }
                                     } else {
                                         let text = column_value(c, column);
                                         ui.add_sized([*width, ROW_HEIGHT], egui::Label::new(egui::RichText::new(text).size(15.0)));
@@ -1066,48 +1110,74 @@ mod tests {
     }
 
     #[test]
+    fn narrow_and_wide_views_keep_controls_and_errors_accessible() {
+        let settings = Settings { provider: Provider::Tradier, use_vibestrader: false };
+        for width in [640.0, 1440.0] {
+            let mut view = view();
+            view.stream_status = "Stream disconnected".into();
+            view.error = "Could not refresh options".into();
+            let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(width, 900.0))
+                .build_ui_state(|ui, view: &mut OptionsView| { view.show(ui.ctx(), settings); }, view);
+            h.run_steps(3);
+            for label in ["Calls", "Puts", "Expiration", "Refresh", "Columns", "Stream disconnected", "Could not refresh options", "About prices and charts"] {
+                let rect = h.get_by_label(label).rect();
+                assert!(rect.left() >= 0.0 && rect.right() <= width, "{label} clipped at width {width}: {rect:?}");
+            }
+            if width == 640.0 {
+                for label in ["Strike", "Bid", "Ask", "Last · chart"] {
+                    let rect = h.get_by_label(label).rect();
+                    assert!(rect.right() <= width, "important column {label} is off-screen: {rect:?}");
+                }
+            }
+            h.get_by_label("About prices and charts").click();
+            h.run_steps(2);
+            assert!(h.query_by_label_contains("adjusted contracts may differ").is_some());
+            assert!(h.query_by_label("$3.06 ($306.00)").is_some(), "last snapshot should remain visible during an error");
+        }
+    }
+
+    #[test]
     #[ignore = "headless visual inspection"]
     fn render_options_view() {
-        let mut view = view();
-        view.underlying = Some(MarketQuote {
+        let mut preview = view();
+        preview.underlying = Some(MarketQuote {
             symbol: "SPY".into(),
             last: 499.60,
             previous_close: 500.0,
             time: chrono::Utc::now(),
         });
-        view.scroll_to_price = false;
-        view.contracts[0].change_percentage = Some(-58.65);
-        view.contracts[0].iv = Some(0.24);
-        view.contracts[0].bid = Some(3.04);
-        view.contracts[0].ask = Some(3.08);
-        view.contracts[0].change = Some(-2.75);
-        view.contracts[0].volume = Some(42112.0);
+        preview.scroll_to_price = false;
+        preview.contracts[0].change_percentage = Some(-58.65);
+        preview.contracts[0].iv = Some(0.24);
+        preview.contracts[0].bid = Some(3.04);
+        preview.contracts[0].ask = Some(3.08);
+        preview.contracts[0].change = Some(-2.75);
+        preview.contracts[0].volume = Some(42112.0);
         for strike in 496..=504 {
-            view.contracts.push(contract(
+            preview.contracts.push(contract(
                 &format!("SPY{strike}C"),
                 "call",
                 strike as f64,
                 3.06,
             ));
         }
-        let mut h = egui_kittest::Harness::builder()
-            .allow_missing_glyphs()
-            .with_size(egui::vec2(1440.0, 900.0))
-            .wgpu()
-            .build_ui_state(
-                |ui, view: &mut OptionsView| {
-                    egui_charts::theme::apply_to_egui(ui.ctx(), &egui_charts::theme::Theme::dark());
-                    view.show(ui.ctx(), Settings::default());
-                },
-                view,
-            );
-        h.run_steps(3);
-        h.render()
-            .unwrap()
-            .save(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target/options-preview.png"),
-            )
-            .unwrap();
+        preview.stream_status = "Live option quotes · receiving market events".into();
+        for (name, width, dark) in [("dark", 1440.0, true), ("light", 1440.0, false), ("narrow", 640.0, true)] {
+            let mut sample = view();
+            sample.underlying = preview.underlying.clone();
+            sample.contracts = preview.contracts.clone();
+            sample.stream_status = preview.stream_status.clone();
+            sample.scroll_to_price = false;
+            let mut h = egui_kittest::Harness::builder()
+                .allow_missing_glyphs().with_size(egui::vec2(width, 900.0)).wgpu()
+                .build_ui_state(move |ui, view: &mut OptionsView| {
+                    let theme = if dark { egui_charts::theme::Theme::dark() } else { egui_charts::theme::Theme::light() };
+                    egui_charts::theme::apply_to_egui(ui.ctx(), &theme);
+                    view.show(ui.ctx(), Settings { provider: Provider::Tradier, use_vibestrader: false });
+                }, sample);
+            h.run_steps(3);
+            h.render().unwrap().save(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../target/options-preview-{name}.png"))).unwrap();
+        }
     }
 }
