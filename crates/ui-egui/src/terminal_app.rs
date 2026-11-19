@@ -547,7 +547,7 @@ impl TerminalApp {
             }
         };
         let label = if status.is_empty() {
-            source.to_owned()
+            format!("{source} · Connecting…")
         } else if self.settings.provider == Provider::Yahoo && status.starts_with("Yahoo") {
             status
         } else {
@@ -570,23 +570,32 @@ impl TerminalApp {
         } else {
             format!("{label} · {}", self.alert_error)
         };
-        egui::Panel::bottom("tradecraft_connection_status").show(ui, |ui| {
-            ui.label(status);
+        egui::Panel::bottom("tradecraft_connection_status")
+            .exact_size(28.0)
+            .show(ui, |ui| {
+            let text = format!("Market data: {status}");
+            ui.add(egui::Label::new(&text).truncate()).on_hover_text(&text);
         });
         let overrides = if self.settings.provider == Provider::Tradier {
             self.feed.calendar_overrides()
         } else {
             Vec::new()
         };
-        for action in self.terminal.show_with(ui, |ui, _, chart| {
-            configure_session_shading(chart, &overrides);
-            if chart.chart_options().tooltip.enabled {
-                let mut options = chart.chart_options().clone();
-                options.tooltip.enabled = false;
-                chart.set_chart_options(options);
-            }
-            chart.show(ui)
-        }) {
+        // The terminal paints its entire max_rect. Restrict it to the space left
+        // after the status panel so its background cannot paint over the strip.
+        let content_rect = ui.available_rect_before_wrap();
+        let actions = ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+            self.terminal.show_with(ui, |ui, _, chart| {
+                configure_session_shading(chart, &overrides);
+                if chart.chart_options().tooltip.enabled {
+                    let mut options = chart.chart_options().clone();
+                    options.tooltip.enabled = false;
+                    chart.set_chart_options(options);
+                }
+                chart.show(ui)
+            })
+        }).inner;
+        for action in actions {
             if matches!(action, egui_charts_terminal::Action::TopToolbar(TopToolbarAction::Host(ref id)) if id == "options") {
                 self.options.open_for(self.terminal.chart().symbol(), self.settings);
             }
@@ -1917,6 +1926,43 @@ mod tests {
         assert!(h.query_by_label("1 hour").is_some());
         assert!(h.query_by_label("Custom interval…").is_some());
         assert!(h.query_by_label("5 minutes").is_none());
+    }
+
+    #[test]
+    fn market_data_status_has_a_visible_strip_and_tracks_connection_state() {
+        for (width, height) in [(640.0, 480.0), (1200.0, 760.0)] {
+            let mut app = isolated_options_test_app();
+            app.feed = Arc::new(Feed::new(Settings::default()));
+            app.settings.provider = Provider::Tradier;
+            app.terminal = Terminal::new(Arc::new(OfflineFeed)).with_symbol("SPY");
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(width, height))
+                .build_ui_state(|ui, app: &mut TerminalApp| app.show_ui(ui), app);
+            for message in ["", "Connecting to market data…", "Stream connected · receiving prices", "Waiting for Tradier history to catch up; retrying", "Stream disconnected"] {
+                h.state().feed.set_status_for_test(message);
+                h.run_steps(3);
+                let label = h.get_by_label_contains(if message.is_empty() { "Connecting…" } else { message }).rect();
+                let chart = h.state().terminal.chart().get_rendered_price_rect();
+                assert!(label.top() >= height - 60.0 && label.bottom() <= height, "status is outside the bottom strip: {label:?}");
+                assert!(chart.bottom() <= label.top(), "chart overlaps the status: {chart:?} / {label:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "renders a status-bar preview for visual inspection"]
+    fn render_market_data_status_preview() {
+        let mut app = isolated_options_test_app();
+        app.feed = Arc::new(Feed::new(Settings::default()));
+        app.settings.provider = Provider::Tradier;
+        app.feed.set_status_for_test("Waiting for Tradier history to catch up; retrying");
+        app.terminal = Terminal::new(Arc::new(OfflineFeed)).with_symbol("SPY");
+        let mut h = egui_kittest::Harness::builder().allow_missing_glyphs()
+            .with_size(egui::vec2(1200.0, 760.0)).wgpu()
+            .build_ui_state(|ui, app: &mut TerminalApp| app.show_ui(ui), app);
+        h.run_steps(4);
+        h.render().unwrap().save(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/market-status-preview.png")).unwrap();
     }
 
     #[test]

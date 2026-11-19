@@ -36,6 +36,13 @@ pub(crate) struct State {
     pub(crate) calendar_overrides: std::collections::BTreeMap<chrono::NaiveDate, egui_charts::model::SessionOverride>,
 }
 impl Feed {
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, status: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.status = status.to_owned();
+            state.last_price_update = None;
+        }
+    }
     pub(crate) fn options_stream(&self, symbols: Vec<String>, ctx: egui::Context) -> Option<Arc<Mutex<crate::options_stream::State>>> {
         self.tradier.as_ref()?.options(symbols, ctx)
     }
