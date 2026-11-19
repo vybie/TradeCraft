@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redesign the options chain with a clearer underlying summary, compact controls, visible market-data status, and an adaptive narrow layout that prioritizes strike and quote prices.
+
 - Keep the market-data connection and recovery status visible in a dedicated bottom strip.
 
 - Keep chart prices updating during Tradier reconnect recovery, then reconcile provisional candles without double-counting buffered volume.
