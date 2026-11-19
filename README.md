@@ -12,6 +12,8 @@ The main window uses the egui-charts terminal, including its indicator catalog, 
 
 Use the **+** above the toolbar to open another chart tab and choose its symbol. The app saves open tabs and their chart snapshots with user settings and restores them on restart or after changing market-data settings. Experimental Pine studies retain the source used when applied, independently of later edits. Other unregistered custom studies cannot yet be restored; the last complete workspace snapshot is kept and a warning is shown. Named layouts remain separate.
 
+The bottom status strip shows the selected market-data source and connection, recovery, or error messages. Hover over it to read a longer message.
+
 On quit, TradeCraft waits for pending saves. If saving fails or takes longer than expected, it remains open and offers retry, a return to the app, or a separately confirmed quit without saving. Closing the window sends TradeCraft to the notification area or menu bar when a tray is available; use the tray menu to quit.
 
 The watchlist shows provider quotes and changes, and symbol search supports company names and tickers. Tradier watchlist prices update from the shared stream; an initial batched quote request supplies the previous close. Yahoo quotes are based on completed candles delayed by at least 15 minutes and refresh approximately once a minute. Kraken's supported crypto spot pairs are available in symbol search and use its public live ticker and candle streams. Crypto watchlist changes are rolling 24-hour changes. BTCUSD remains an alias for Kraken's BTC/USD. Kraken's spot history returns at most 720 recent candles, including the current candle. Provider availability and entitlements apply.

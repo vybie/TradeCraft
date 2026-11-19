@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep the market-data connection and recovery status visible in a dedicated bottom strip.
+
 - Keep chart prices updating during Tradier reconnect recovery, then reconcile provisional candles without double-counting buffered volume.
 
 - Install a Linux desktop launcher and identify the window so desktop docks show the TradeCraft icon.
