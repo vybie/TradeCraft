@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Give Calls and Puts distinct colors, use signed color-coded price changes, center the underlying marker, and restore rounded chart buttons.
+
 - Redesign the options chain with a clearer underlying summary, compact controls, visible market-data status, and an adaptive narrow layout that prioritizes strike and quote prices.
 
 - Keep the market-data connection and recovery status visible in a dedicated bottom strip.
