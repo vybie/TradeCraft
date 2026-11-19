@@ -455,6 +455,25 @@ fn percent(value: Option<f64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+// Pair colour with signed numbers and text labels, so meaning is not colour-only.
+fn change_color(value: f64, dark: bool) -> Option<egui::Color32> {
+    if !value.is_finite() || value == 0.0 { return None; }
+    Some(match (value > 0.0, dark) {
+        (true, true) => egui::Color32::from_rgb(110, 224, 176),
+        (true, false) => egui::Color32::from_rgb(0, 108, 76),
+        (false, true) => egui::Color32::from_rgb(255, 150, 153),
+        (false, false) => egui::Color32::from_rgb(169, 36, 49),
+    })
+}
+
+fn contract_type_color(puts: bool, dark: bool) -> egui::Color32 {
+    change_color(if puts { -1.0 } else { 1.0 }, dark).unwrap_or(egui::Color32::WHITE)
+}
+
+fn contract_type_fill(puts: bool) -> egui::Color32 {
+    if puts { egui::Color32::from_rgb(165, 45, 62) } else { egui::Color32::from_rgb(0, 112, 81) }
+}
+
 fn dollars(number: f64) -> String {
     CurrencyFormatter::usd().format(number)
 }
@@ -497,14 +516,14 @@ fn column_value(contract: &Contract, column: &Column) -> String {
             contract_price(number)
         }
         ColumnFormat::Price if column.key == "change" => {
-            number.map(dollars).unwrap_or_else(|| "—".into())
+            number.map(|n| if n > 0.0 { format!("+{}", dollars(n)) } else { dollars(n) }).unwrap_or_else(|| "—".into())
         }
         ColumnFormat::Price => value(number, 2),
         ColumnFormat::Integer => number
             .map(|n| CurrencyFormatter::new("", 0).format(n))
             .unwrap_or_else(|| "—".into()),
         ColumnFormat::Greek => value(number, 4),
-        ColumnFormat::Percent => percent(number),
+        ColumnFormat::Percent => number.map(|n| if n > 0.0 { format!("+{n:.2}%") } else { format!("{n:.2}%") }).unwrap_or_else(|| "—".into()),
         ColumnFormat::Volatility => percent(number.map(|n| n * 100.0)),
         ColumnFormat::Timestamp => raw
             .as_i64()
@@ -539,6 +558,13 @@ fn marker_index(rows: &[&Contract], price: f64) -> usize {
         .unwrap_or(rows.len())
 }
 
+fn marker_badge_rect(row: egui::Rect, clip: egui::Rect, size: egui::Vec2) -> egui::Rect {
+    let left = row.left().max(clip.left());
+    let right = row.right().min(clip.right());
+    let center_x = if left < right { (left + right) / 2.0 } else { row.center().x };
+    egui::Rect::from_center_size(egui::pos2(center_x, row.center().y), size)
+}
+
 fn underlying_marker(ui: &mut egui::Ui, price: f64, width: f32) {
     let text = format!("Underlying: ${price:.2}");
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::hover());
@@ -555,11 +581,8 @@ fn underlying_marker(ui: &mut egui::Ui, price: f64, width: f32) {
     let text_size = painter
         .layout_no_wrap(text.clone(), font.clone(), accent_text)
         .size();
-    // Anchor the badge near Strike so it remains visible before horizontally scrolling.
-    let badge = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + 12.0, rect.center().y - 13.0),
-        egui::vec2(text_size.x + 24.0, 26.0),
-    );
+    // Center in the visible viewport, not the wider horizontally scrolled table.
+    let badge = marker_badge_rect(rect, ui.clip_rect(), egui::vec2(text_size.x + 24.0, 26.0));
     painter.rect_filled(badge, egui::CornerRadius::same(13), accent);
     painter.text(
         badge.center(),
@@ -781,7 +804,9 @@ impl OptionsView {
                             let percent = (quote.previous_close != 0.0).then(|| change / quote.previous_close * 100.0);
                             ui.label(egui::RichText::new(format!("${:.2}", quote.last)).size(22.0).strong());
                             if let Some(percent) = percent {
-                                ui.label(egui::RichText::new(format!("{change:+.2}  ({percent:+.2}%)")).strong());
+                                let mut text = egui::RichText::new(format!("{change:+.2}  ({percent:+.2}%)")).strong();
+                                if let Some(color) = change_color(change, ui.visuals().dark_mode) { text = text.color(color); }
+                                ui.label(text);
                             }
                         }
                     });
@@ -801,7 +826,12 @@ impl OptionsView {
                 ui.horizontal_wrapped(|ui| {
                     for (label, puts) in [("Calls", false), ("Puts", true)] {
                         let selected = self.show_puts == puts;
-                        let button = egui::Button::selectable(selected, egui::RichText::new(label).strong()).min_size(egui::vec2(74.0, 34.0));
+                        let color = contract_type_color(puts, ui.visuals().dark_mode);
+                        let fill = if selected { contract_type_fill(puts) } else { ui.visuals().window_fill.lerp_to_gamma(color, 0.10) };
+                        let text = egui::RichText::new(label).strong().color(if selected { egui::Color32::WHITE } else { color });
+                        let button = egui::Button::selectable(selected, text).fill(fill)
+                            .stroke(egui::Stroke::new(1.0, if selected { fill } else { color }))
+                            .corner_radius(8).min_size(egui::vec2(74.0, 34.0));
                         if ui.add(button).clicked() && !selected { self.show_puts = puts; self.scroll_to_price = true; }
                     }
                     ui.add_space(6.0);
@@ -912,13 +942,25 @@ impl OptionsView {
                                     if column.key == "strike" || column.key == "last" {
                                         let text = if column.key == "strike" { dollars(c.strike) } else if c.last.is_some() { contract_price(c.last) } else { "View chart".into() };
                                         let color = if column.key == "last" { ui.visuals().hyperlink_color } else { ui.visuals().text_color() };
-                                        let mut rich = egui::RichText::new(text).size(14.0).color(color).strong();
-                                        if column.key == "last" { rich = rich.underline(); }
-                                        let button = egui::Button::new(rich).frame(false);
-                                        if ui.add_sized([*width, ROW_HEIGHT], button).on_hover_text(format!("Open chart for {}", c.symbol)).clicked() { picked = Some(c.symbol.clone()); }
+                                        let rich = egui::RichText::new(text).size(14.0).color(color).strong();
+                                        if column.key == "last" {
+                                            let fill = ui.visuals().window_fill.lerp_to_gamma(ui.visuals().text_color(), 0.08);
+                                            let button = egui::Button::new(rich).fill(fill).stroke(ui.visuals().window_stroke).corner_radius(8);
+                                            ui.allocate_ui_with_layout(egui::vec2(*width, ROW_HEIGHT), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                ui.add_space(8.0);
+                                                if ui.add_sized([(*width - 16.0).max(1.0), 32.0], button).on_hover_text(format!("Open chart for {}", c.symbol)).clicked() { picked = Some(c.symbol.clone()); }
+                                            });
+                                        } else {
+                                            let button = egui::Button::new(rich).frame(false);
+                                            if ui.add_sized([*width, ROW_HEIGHT], button).on_hover_text(format!("Open chart for {}", c.symbol)).clicked() { picked = Some(c.symbol.clone()); }
+                                        }
                                     } else {
                                         let text = column_value(c, column);
-                                        ui.add_sized([*width, ROW_HEIGHT], egui::Label::new(egui::RichText::new(text).size(15.0)));
+                                        let change = match column.key { "change" => c.change, "change_percentage" => c.change_percentage, _ => None };
+                                        let mut rich = egui::RichText::new(text).size(15.0);
+                                        if let Some(color) = change.and_then(|n| change_color(n, ui.visuals().dark_mode)) { rich = rich.color(color); }
+                                        ui.add_sized([*width, ROW_HEIGHT], egui::Label::new(rich));
                                     }
                                 }
                             });
@@ -1041,6 +1083,41 @@ mod tests {
     }
 
     #[test]
+    fn underlying_badge_is_centered_in_visible_table_while_scrolling() {
+        let row = egui::Rect::from_min_size(egui::pos2(20.0, 100.0), egui::vec2(1400.0, 32.0));
+        let size = egui::vec2(140.0, 26.0);
+        let wide = marker_badge_rect(row, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1600.0, 900.0)), size);
+        assert_eq!(wide.center().x, row.center().x);
+        let viewport = egui::Rect::from_min_max(egui::pos2(300.0, 0.0), egui::pos2(800.0, 900.0));
+        let scrolled = marker_badge_rect(row, viewport, size);
+        assert_eq!(scrolled.center().x, viewport.center().x);
+        assert!(viewport.contains_rect(scrolled));
+    }
+
+    #[test]
+    fn directional_colors_have_readable_contrast_in_both_themes() {
+        fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+            fn luminance(c: egui::Color32) -> f32 {
+                let c = egui::Rgba::from(c);
+                0.2126 * c.r() + 0.7152 * c.g() + 0.0722 * c.b()
+            }
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+        for dark in [false, true] {
+            let theme = if dark { egui_charts::theme::Theme::dark() } else { egui_charts::theme::Theme::light() };
+            for puts in [false, true] {
+                let foreground = contract_type_color(puts, dark);
+                let inactive = theme.ui.panel_bg_floating.lerp_to_gamma(foreground, 0.10);
+                assert!(contrast(foreground, inactive) >= 4.5, "inactive {puts} {dark}");
+                assert!(contrast(egui::Color32::WHITE, contract_type_fill(puts)) >= 4.5, "selected {puts} {dark}");
+            }
+        }
+        assert!(change_color(0.0, true).is_none());
+        assert!(change_color(f64::NAN, true).is_none());
+    }
+
+    #[test]
     fn required_columns_remain_visible_and_optional_fields_are_formatted() {
         let selected: Vec<String> = vec!["open_interest".into(), "greeks.bid_iv".into()];
         let shown: Vec<_> = COLUMNS
@@ -1085,6 +1162,11 @@ mod tests {
         assert_eq!(field("ask"), "$1.25 ($125.00)");
         assert_eq!(field("last"), "$3.06 ($306.00)");
         assert_eq!(field("change"), "-$2.75");
+        c.change = Some(2.75);
+        c.change_percentage = Some(5.0);
+        let field = |key| column_value(&c, COLUMNS.iter().find(|x| x.key == key).unwrap());
+        assert_eq!(field("change"), "+$2.75");
+        assert_eq!(field("change_percentage"), "+5.00%");
         assert_eq!(contract_price(None), "—");
     }
 
@@ -1153,21 +1235,33 @@ mod tests {
         preview.contracts[0].ask = Some(3.08);
         preview.contracts[0].change = Some(-2.75);
         preview.contracts[0].volume = Some(42112.0);
+        preview.contracts[1].bid = Some(4.24);
+        preview.contracts[1].ask = Some(4.32);
+        preview.contracts[1].change = Some(1.15);
+        preview.contracts[1].change_percentage = Some(36.74);
         for strike in 496..=504 {
-            preview.contracts.push(contract(
-                &format!("SPY{strike}C"),
-                "call",
-                strike as f64,
-                3.06,
-            ));
+            if strike == 500 { continue; }
+            for (kind, suffix, price) in [
+                ("call", "C", (3.06 + (500 - strike) as f64 * 0.55).max(0.10)),
+                ("put", "P", (4.28 + (strike - 500) as f64 * 0.55).max(0.10)),
+            ] {
+                let mut item = contract(&format!("SPY{strike}{suffix}"), kind, strike as f64, price);
+                item.bid = Some((price - 0.04).max(0.0));
+                item.ask = Some(price + 0.04);
+                item.change = Some(if kind == "call" { -0.40 } else { 0.55 });
+                item.change_percentage = Some(if kind == "call" { -12.50 } else { 14.20 });
+                item.volume = Some((5000 + (strike - 496) * 430) as f64);
+                preview.contracts.push(item);
+            }
         }
         preview.stream_status = "Live option quotes · receiving market events".into();
-        for (name, width, dark) in [("dark", 1440.0, true), ("light", 1440.0, false), ("narrow", 640.0, true)] {
+        for (name, width, dark, puts) in [("dark", 1440.0, true, false), ("dark-puts", 1440.0, true, true), ("light", 1440.0, false, false), ("light-puts", 1440.0, false, true), ("narrow", 640.0, true, false), ("narrow-puts", 640.0, true, true)] {
             let mut sample = view();
             sample.underlying = preview.underlying.clone();
             sample.contracts = preview.contracts.clone();
             sample.stream_status = preview.stream_status.clone();
             sample.scroll_to_price = false;
+            sample.show_puts = puts;
             let mut h = egui_kittest::Harness::builder()
                 .allow_missing_glyphs().with_size(egui::vec2(width, 900.0)).wgpu()
                 .build_ui_state(move |ui, view: &mut OptionsView| {
