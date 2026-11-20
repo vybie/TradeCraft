@@ -114,4 +114,47 @@ mod tests {
         assert!(Instance::acquire_in(&directory).unwrap().is_some());
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn child_process_attempts_duplicate() {
+        let Some(directory) = std::env::var_os("TRADECRAFT_INSTANCE_TEST_DIR") else {
+            return;
+        };
+        assert!(
+            Instance::acquire_in(Path::new(&directory))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn another_process_cannot_start_and_requests_activation() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("tradecraft-child-{}-{unique}", std::process::id()));
+        let mut first = Instance::acquire_in(&directory).unwrap().unwrap();
+        first.watch(egui::Context::default());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "instance::tests::child_process_attempts_duplicate",
+            ])
+            .env("TRADECRAFT_INSTANCE_TEST_DIR", &directory)
+            .status()
+            .unwrap();
+        assert!(child.success());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !first.take_open_request() {
+            assert!(
+                Instant::now() < deadline,
+                "child process did not request activation"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(first);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
