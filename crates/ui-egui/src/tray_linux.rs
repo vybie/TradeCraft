@@ -16,6 +16,7 @@ struct Item {
     tx: SyncSender<Action>,
     ctx: egui::Context,
     online: Arc<AtomicBool>,
+    icon_name: String,
 }
 
 impl Item {
@@ -32,6 +33,15 @@ impl ksni::Tray for Item {
     }
     fn title(&self) -> String {
         "TradeCraft".into()
+    }
+    fn icon_name(&self) -> String {
+        self.icon_name.clone()
+    }
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "TradeCraft".into(),
+            ..Default::default()
+        }
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let mut data =
@@ -89,6 +99,7 @@ impl Tray {
             tx,
             ctx: ctx.clone(),
             online: online.clone(),
+            icon_name: tray_icon_path().unwrap_or_default(),
         };
         match item.spawn() {
             Ok(handle) => Some(Self {
@@ -126,6 +137,20 @@ impl Tray {
     }
 }
 
+// GNOME's AppIndicator host handles a file path as well as an icon theme name.
+// Materialize the embedded icon so running directly from a build also works.
+// The embedded pixmap remains available to hosts if writing the file fails.
+fn tray_icon_path() -> Option<String> {
+    let directory = tradecraft_providers::settings::data_dir()?;
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join("tray-icon.png");
+    let icon = include_bytes!("../../../apps/tradecraft/assets/tradecraft.png");
+    if std::fs::read(&path).ok().as_deref() != Some(icon.as_slice()) {
+        std::fs::write(&path, icon).ok()?;
+    }
+    path.to_str().map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +163,7 @@ mod tests {
             tx,
             ctx: egui::Context::default(),
             online: online.clone(),
+            icon_name: String::new(),
         };
         assert!(ksni::Tray::watcher_offline(&item, ksni::OfflineReason::No));
         assert!(!online.load(Ordering::Acquire));
@@ -172,6 +198,15 @@ mod tests {
             .split('\'')
             .find(|entry| entry.contains(&format!("StatusNotifierItem-{}-", std::process::id())))
             .expect("registered item name");
+        let icon = std::process::Command::new("gdbus")
+            .args([
+                "call", "--session", "--dest", name, "--object-path", "/StatusNotifierItem",
+                "--method", "org.freedesktop.DBus.Properties.Get", "org.kde.StatusNotifierItem", "IconName",
+            ])
+            .output()
+            .expect("read tray icon name");
+        assert!(icon.status.success());
+        assert!(String::from_utf8_lossy(&icon.stdout).contains("tray-icon.png"));
         let activated = std::process::Command::new("gdbus")
             .args([
                 "call",

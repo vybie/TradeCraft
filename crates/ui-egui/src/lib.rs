@@ -12,6 +12,7 @@
 )]
 
 mod terminal_app;
+mod instance;
 mod options_view;
 mod options_stream;
 mod pine_engine;
@@ -386,6 +387,11 @@ pub fn run() -> eframe::Result {
         check_live();
         return Ok(());
     }
+    let Some(instance) = instance::Instance::acquire().map_err(|error| {
+        eframe::Error::AppCreation(Box::new(error))
+    })? else {
+        return Ok(());
+    };
     let window_settings = window_settings::WindowSettings::load();
     eframe::run_native(
         "TradeCraft",
@@ -415,6 +421,7 @@ pub fn run() -> eframe::Result {
         },
         Box::new(move |cc| {
             let mut app = terminal_app::TerminalApp::new_with_window_settings(window_settings);
+            app.init_instance(instance, &cc.egui_ctx);
             app.init_tray(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
