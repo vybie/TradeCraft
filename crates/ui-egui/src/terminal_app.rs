@@ -154,6 +154,7 @@ mod tray;
 #[path = "tray_linux.rs"]
 mod tray;
 pub struct TerminalApp {
+    instance: Option<crate::instance::Instance>,
     terminal: Terminal,
     feed: Arc<Feed>,
     storage: Arc<FileStorage>,
@@ -204,6 +205,7 @@ impl TerminalApp {
             Timeframe::Min5,
         );
         Self {
+            instance: None,
             terminal,
             feed,
             storage,
@@ -225,6 +227,10 @@ impl TerminalApp {
             pine_catalog_revision: 0,
             options: crate::options_view::OptionsView::default(),
         }
+    }
+    pub(crate) fn init_instance(&mut self, mut instance: crate::instance::Instance, ctx: &egui::Context) {
+        instance.watch(ctx.clone());
+        self.instance = Some(instance);
     }
     pub(crate) fn init_tray(&mut self, ctx: &egui::Context) {
         #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
@@ -336,6 +342,11 @@ impl TerminalApp {
 }
 impl eframe::App for TerminalApp {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if self.instance.as_ref().is_some_and(|instance| instance.take_open_request()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         match self.flush_alerts() {
             Ok(()) => self.alert_error.clear(),
             Err(error) => self.alert_error = error,
