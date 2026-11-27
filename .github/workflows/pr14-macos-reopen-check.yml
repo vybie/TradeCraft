@@ -1,0 +1,124 @@
+name: PR 14 macOS reopen check
+
+on:
+  push:
+    branches: [codex/pr14-macos-reopen-check]
+    paths: [.github/workflows/pr14-macos-reopen-check.yml]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  reopen:
+    name: Reopen TradeCraft with Auto and Metal
+    runs-on: macos-15
+    timeout-minutes: 8
+    steps:
+      - name: Download the PR 14 Apple Silicon bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: TradeCraft-macos-aarch64-apple-darwin
+          run-id: 45433656502
+          github-token: ${{ github.token }}
+          path: pr14-bundle
+      - name: Launch and reopen both backend choices
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          archive="$(find pr14-bundle -type f -name '*.zip' -print)"
+          test -f "$archive"
+          ditto -x -k "$archive" unpacked
+          app="$(find unpacked -type d -name TradeCraft.app -print)"
+          test -x "$app/Contents/MacOS/tradecraft"
+
+          cat > "$RUNNER_TEMP/tradecraft-window.swift" <<'SWIFT'
+          import AppKit
+          import CoreGraphics
+          import Darwin
+          import Metal
+
+          if CommandLine.arguments[1] == "preflight" {
+              guard let device = MTLCreateSystemDefaultDevice() else {
+                  print("The hosted runner has no Metal device.")
+                  exit(2)
+              }
+              print("Metal device: \(device.name)")
+              exit(0)
+          }
+          guard let pid = Int32(CommandLine.arguments[2]) else { exit(2) }
+          if CommandLine.arguments[1] == "quit" {
+              exit(NSRunningApplication(processIdentifier: pid)?.terminate() == true ? 0 : 1)
+          }
+          let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+          let hasWindow = windows.contains { window in
+              let owner = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+              let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue
+              guard owner == pid, layer == 0,
+                    let bounds = window[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
+              return (bounds["Width"]?.intValue ?? 0) >= 100 && (bounds["Height"]?.intValue ?? 0) >= 100
+          }
+          exit(hasWindow ? 0 : 1)
+          SWIFT
+          swiftc "$RUNNER_TEMP/tradecraft-window.swift" -o "$RUNNER_TEMP/tradecraft-window"
+          "$RUNNER_TEMP/tradecraft-window" preflight
+
+          python3 - "$app/Contents/MacOS/tradecraft" "$RUNNER_TEMP/tradecraft-window" <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+
+          executable, window_helper = map(lambda arg: Path(arg).resolve(), sys.argv[1:])
+          app_data = Path.home() / "Library" / "Application Support" / "TradeCraft"
+          app_data.mkdir(parents=True, exist_ok=True)
+          preferences = app_data / "graphics-community.json"
+          startup_log = app_data / "tradecraft.log"
+          env = os.environ.copy()
+          env.pop("WGPU_BACKEND", None)
+
+          def launch(backend, launch_number):
+              startup_log.unlink(missing_ok=True)
+              output_path = Path(os.environ["RUNNER_TEMP"]) / f"tradecraft-{backend}-{launch_number}.txt"
+              with output_path.open("wb") as output:
+                  process = subprocess.Popen([executable], stdout=output, stderr=subprocess.STDOUT, env=env)
+                  try:
+                      for _ in range(55):
+                          if process.poll() is not None:
+                              raise RuntimeError(f"TradeCraft exited during launch: {process.returncode}")
+                          log = startup_log.read_text() if startup_log.exists() else ""
+                          if (
+                              f"setting={backend.title()}, WGPU_BACKEND=unset" in log
+                              and "| backend Metal |" in log
+                              and "graphics initialised: first frames rendered" in log
+                              and subprocess.run([window_helper, "window", str(process.pid)]).returncode == 0
+                          ):
+                              break
+                          time.sleep(1)
+                      else:
+                          raise RuntimeError("Timed out waiting for a visible Metal window and rendered frames.")
+
+                      subprocess.run([window_helper, "quit", str(process.pid)], check=True)
+                      if process.wait(timeout=20) != 0:
+                          raise RuntimeError(f"TradeCraft did not quit normally: {process.returncode}")
+                      if "TradeCraft exited normally" not in startup_log.read_text():
+                          raise RuntimeError("The normal exit message is missing.")
+                      print(f"PASS {backend} launch {launch_number}: visible Metal window, frames rendered, normal exit.")
+                  finally:
+                      if process.poll() is None:
+                          process.kill()
+                          process.wait(timeout=5)
+                      if startup_log.exists():
+                          print(startup_log.read_text())
+                      print(output_path.read_text(errors="replace")[-6000:])
+
+          for backend in ("auto", "metal"):
+              preferences.write_text(json.dumps({"backend": backend}))
+              launch(backend, 1)
+              if json.loads(preferences.read_text()).get("backend") != backend:
+                  raise RuntimeError(f"Saved {backend} preference changed after quit.")
+              launch(backend, 2)
+          PYTHON
