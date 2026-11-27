@@ -28,6 +28,14 @@ Community builds use `cargo build --release` and exclude the VibesTrader credent
 
 On Windows, closing the window minimizes TradeCraft to the taskbar. Click its notification-area icon to reopen it, or use the icon's menu to quit. Quitting releases its market-data connection.
 
+### Windows troubleshooting
+
+**The app closes at startup or shows no window.** Some Intel iGPU Vulkan drivers crash while TradeCraft initialises graphics. Windows builds therefore use DirectX 12 by default. To choose another backend, open Market data settings and set Graphics backend to Auto, DX12, Vulkan or OpenGL; the choice applies the next time TradeCraft starts. The `WGPU_BACKEND` environment variable (`dx12`, `vulkan` or `opengl`) overrides the setting, for example `$env:WGPU_BACKEND = "vulkan"; .\tradecraft.exe`.
+
+If the previous start never finished initialising graphics, the next start automatically tries DX12 and then OpenGL for that start only. The saved setting is unchanged.
+
+TradeCraft writes `tradecraft.log` in its application-data folder (`%LOCALAPPDATA%\TradeCraft`). It records the requested backend, the adapter and driver version wgpu selected, panics and initialisation errors; include it when reporting a graphics problem. The log is rotated to `tradecraft.log.old` at 256 KB. The Graphics backend setting is stored in `graphics-community.json` or `graphics-personal.json`, each beside its own crash marker (`.marker`). On macOS only Auto and Metal are offered.
+
 ### macOS build
 
 On a Mac with Rust and Xcode command line tools installed, run `bash scripts/build-macos.sh`. The community app and zip are created under `target/packages`; pass `aarch64-apple-darwin` or `x86_64-apple-darwin` to select an installed Rust target. The macOS GitHub Actions workflow also builds both architectures. These builds are unsigned and not notarized. macOS stores app data in `~/Library/Application Support/TradeCraft` and manually entered Tradier credentials in Keychain. The Windows-only VibesTrader credential shortcut is excluded. Closing the macOS window quits the app; menu-bar behavior is not implemented.

@@ -11,6 +11,8 @@
     )
 )]
 
+mod graphics;
+mod startup_log;
 mod terminal_app;
 mod options_view;
 mod pine_engine;
@@ -374,7 +376,14 @@ pub fn run() -> eframe::Result {
         return Ok(());
     }
     let window_settings = window_settings::WindowSettings::load();
-    eframe::run_native(
+    let graphics_backend = graphics::GraphicsBackend::load();
+    startup_log::install_panic_hook();
+    startup_log::log(format!(
+        "TradeCraft {} ({} build) starting",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(feature = "vibestrader-credential") { "personal" } else { "community" }
+    ));
+    let result = eframe::run_native(
         "TradeCraft",
         eframe::NativeOptions {
             viewport: window_settings
@@ -386,14 +395,21 @@ pub fn run() -> eframe::Result {
                     width: 64,
                     height: 64,
                 })),
+            wgpu_options: graphics::startup(graphics_backend),
             ..Default::default()
         },
         Box::new(move |cc| {
+            graphics::log_adapter(cc.wgpu_render_state.as_ref());
             let mut app = terminal_app::TerminalApp::new_with_window_settings(window_settings);
             app.init_tray(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
-    )
+    );
+    match &result {
+        Ok(()) => startup_log::log("TradeCraft exited normally"),
+        Err(error) => startup_log::log(format!("graphics or window initialisation failed: {error}")),
+    }
+    result
 }
 
 fn check_delayed() {

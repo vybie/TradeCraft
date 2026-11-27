@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Windows now uses DirectX 12 by default instead of Vulkan, which crashed at startup with some Intel iGPU drivers. `WGPU_BACKEND` still overrides the choice.
+- Add a Graphics backend setting (Auto, DX12, Vulkan, OpenGL) to Market data settings, applied at the next start.
+- Write `tradecraft.log` in the application-data folder with the requested backend, selected adapter and driver, panics and graphics initialisation errors.
+- On Windows, if the previous start crashed during graphics initialisation, try DX12 and then OpenGL automatically for the next start. macOS and Linux behaviour is unchanged.
+
 ## 0.4.0 — alpha
 
 - Add a read-only Tradier options chain with expiration selection, calls and puts, configurable columns, quotes and available Greeks; open a contract in a chart tab.
